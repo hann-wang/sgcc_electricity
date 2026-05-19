@@ -94,13 +94,104 @@ class DataFetcher:
             return "error"
         return "unknown"
 
-    # Stealth JS: 覆盖 navigator.webdriver 及相关属性
+    # Stealth JS: 完整覆盖自动化检测特征
     _STEALTH_JS = """
+    // navigator.webdriver
     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-    Object.defineProperty(navigator, 'languages', {get: () => ['zh-HK','zh','en-US','en','zh-CN']});
-    Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'});
-    window.chrome = {runtime: {}, loadTimes: function(){}, csi: function(){}};
+
+    // languages & platform
+    Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN','zh','en-US','en']});
+    Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+
+    // plugins (模拟有真实插件)
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => {
+            const arr = [
+                {name:'Chrome PDF Plugin',filename:'internal-pdf-viewer',description:'Portable Document Format',
+                 length:1,0:{type:'application/x-google-chrome-pdf',suffixes:'pdf'}},
+                {name:'Chrome PDF Viewer',filename:'mhjfbmdgcfjbbpaeojofohoefgiehjai',description:'',
+                 length:1,0:{type:'application/pdf',suffixes:'pdf'}},
+                {name:'Native Client',filename:'internal-nacl-plugin',description:'',
+                 length:2,0:{type:'application/x-nacl',suffixes:''},1:{type:'application/x-pnacl',suffixes:''}}
+            ];
+            arr.item = i => arr[i];
+            arr.namedItem = n => arr.find(p => p.name === n);
+            arr.refresh = () => {};
+            return arr;
+        }
+    });
+
+    // mimeTypes
+    Object.defineProperty(navigator, 'mimeTypes', {
+        get: () => {
+            const arr = [
+                {type:'application/pdf',suffixes:'pdf',description:'Portable Document Format',
+                 enabledPlugin:{name:'Chrome PDF Plugin'}},
+                {type:'application/x-google-chrome-pdf',suffixes:'pdf',description:'Portable Document Format',
+                 enabledPlugin:{name:'Chrome PDF Plugin'}}
+            ];
+            arr.item = i => arr[i];
+            arr.namedItem = n => arr.find(m => m.type === n);
+            return arr;
+        }
+    });
+
+    // chrome runtime (模拟真实 Chrome 对象)
+    if (!window.chrome) window.chrome = {};
+    if (!window.chrome.runtime) {
+        window.chrome.runtime = {
+            connect: function(){return {onMessage:{addListener:function(){}},postMessage:function(){},disconnect:function(){}}},
+            sendMessage: function(){},
+            onMessage: {addListener:function(){}},
+            id: undefined
+        };
+    }
+    window.chrome.csi = function(){};
+    window.chrome.loadTimes = function(){return {commitLoadTime:Date.now()/1000,requestTime:Date.now()/1000}};
+
+    // 修复 iframe contentWindow 检测
+    const originalContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype,'contentWindow');
+    Object.defineProperty(HTMLIFrameElement.prototype,'contentWindow',{
+        get: function(){
+            const result = originalContentWindow.get.call(this);
+            if (result) {
+                try {
+                    Object.defineProperty(result.navigator,'webdriver',{get:()=>undefined});
+                } catch(e){}
+            }
+            return result;
+        }
+    });
+
+    // permissions query (Notification.permission 检测)
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = function(params){
+        if (params.name === 'notifications') {
+            return Promise.resolve({state: Notification.permission});
+        }
+        return originalQuery.call(this, params);
+    };
+
+    // WebGL vendor & renderer (避免暴露 SwiftShader)
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(param){
+        if (param === 37445) return 'Google Inc. (Intel)';
+        if (param === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630, OpenGL 4.5)';
+        return getParameter.call(this, param);
+    };
     """
+
+    @staticmethod
+    def _human_delay(min_s=0.3, max_s=1.2):
+        """生成随机人类行为延迟"""
+        time.sleep(random.uniform(min_s, max_s))
+
+    @staticmethod
+    def _human_type(element, text, min_delay=0.05, max_delay=0.15):
+        """模拟人类逐字输入"""
+        for char in text:
+            element.send_keys(char)
+            time.sleep(random.uniform(min_delay, max_delay))
 
     def _get_webdriver(self):
         logging.info(f"正在初始化 WebDriver, 平台: {platform.system()}")
@@ -113,7 +204,7 @@ class DataFetcher:
             edge_options.add_experimental_option("useAutomationExtension", False)
             edge_options.add_argument(
                 "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0")
+                "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0")
             logging.info("使用 Edge 浏览器 (Windows 模式)")
             driver = webdriver.Edge(
                 service=EdgeService(EdgeChromiumDriverManager(
@@ -123,6 +214,16 @@ class DataFetcher:
                 options=edge_options
             )
             driver.implicitly_wait(self.DRIVER_IMPLICITY_WAIT_TIME)
+
+            # Windows 也注入反检测脚本
+            try:
+                driver.execute_cdp_cmd(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    {"source": self._STEALTH_JS},
+                )
+                logging.info("已注入反 webdriver 检测脚本 (CDP)")
+            except Exception as e:
+                logging.warning(f"CDP 注入失败 (非致命): {e}")
         else:
             # --- Docker / Linux 环境：全量反检测伪装 ---
             browser_window_size = os.getenv("BROWSER_WINDOW_SIZE", "1158,848")
@@ -239,14 +340,18 @@ class DataFetcher:
             return True
         # 增加判空校验便于测试fallback
         elif self._password is not None and len(self._password) > 0:
-            # input username and password
+            # input username and password (模拟人类逐字输入)
             input_elements = driver.find_elements(By.CLASS_NAME, "el-input__inner")
-            input_elements[0].send_keys(self._username)
-            input_elements[1].send_keys(self._password)
+            self._human_delay(0.5, 1.0)
+            self._human_type(input_elements[0], self._username)
+            self._human_delay(0.3, 0.8)
+            self._human_type(input_elements[1], self._password)
             logging.info(f"已输入账号密码, 账号: {self._username}")
 
+            rk001_backoff = 60  # RK001 首次退避等待秒数
             for login_attempt in range(1, self.RETRY_TIMES_LIMIT + 1):
                 # click login button
+                self._human_delay(0.5, 1.5)
                 self._click_button(driver, By.CLASS_NAME, "el-button.el-button--primary")
                 time.sleep(self._step_wait * 2)
                 logging.info(f"已点击登录按钮 (第 {login_attempt}/{self.RETRY_TIMES_LIMIT} 次)")
@@ -274,25 +379,38 @@ class DataFetcher:
                                     return True
                             logging.info(f"第 {retry_times} 次点选验证码识别失败, 正在刷新验证码...")
                             self.tencent_captcha._click_point_click_refresh(driver)
-                            time.sleep(self._step_wait)
+                            self._human_delay(1.0, 2.5)
 
                     logging.error("验证码识别多次失败, 尝试备选登录方案")
                     return self._fallback_login(driver)
                 elif post_login_state == "error":
                     error = self._get_error_message(driver, "//div[@class='errmsg-tip']//span")
                     logging.info(f"登录错误信息: {error}")
-                    # RK001 (网络连接超时) or similar transient errors: retry
+                    # RK001 (网络连接超时) or similar transient errors: backoff and retry
                     if "RK001" in (error or "") or "超时" in (error or "") or "重试" in (error or ""):
-                        logging.info(f"检测到临时错误 [{error}], 正在重新输入账号密码重试 ({login_attempt}/{self.RETRY_TIMES_LIMIT})...")
+                        logging.warning(f"检测到风控错误 [{error}], 退避等待 {rk001_backoff}s 后重试 ({login_attempt}/{self.RETRY_TIMES_LIMIT})...")
+                        time.sleep(rk001_backoff)
+                        rk001_backoff = min(rk001_backoff * 2, 300)  # 指数退避, 最大 5 分钟
+                        # 刷新页面重新登录
                         try:
+                            driver.get(LOGIN_URL)
+                            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME * 2).until(
+                                EC.visibility_of_element_located((By.CLASS_NAME, "user")))
+                            self._human_delay(1.0, 2.0)
+                            # 重新切换到账号密码登录
+                            element = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                                EC.presence_of_element_located((By.CLASS_NAME, 'user')))
+                            driver.execute_script("arguments[0].click();", element)
+                            self._click_button(driver, By.XPATH, '//*[@id="login_box"]/div[1]/div[1]/div[2]/span')
+                            self._human_delay(0.5, 1.0)
+                            self._click_button(driver, By.XPATH, '//*[@id="login_box"]/div[2]/div[1]/form/div[1]/div[3]/div/span[2]')
+                            self._human_delay(0.5, 1.0)
                             input_elements = driver.find_elements(By.CLASS_NAME, "el-input__inner")
-                            input_elements[0].clear()
-                            input_elements[0].send_keys(self._username)
-                            input_elements[1].clear()
-                            input_elements[1].send_keys(self._password)
+                            self._human_type(input_elements[0], self._username)
+                            self._human_delay(0.3, 0.8)
+                            self._human_type(input_elements[1], self._password)
                         except Exception:
                             pass
-                        time.sleep(self._step_wait)
                         continue
 
             return self._fallback_login(driver)
