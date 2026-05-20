@@ -43,17 +43,11 @@ class DataFetcher:
         self.RETRY_TIMES_LIMIT = int(os.getenv("RETRY_TIMES_LIMIT", 5))
         self.LOGIN_EXPECTED_TIME = int(os.getenv("LOGIN_EXPECTED_TIME", 10))
         self.RETRY_WAIT_TIME_OFFSET_UNIT = int(os.getenv("RETRY_WAIT_TIME_OFFSET_UNIT", 10))
-        self.IGNORE_USER_ID = os.getenv("IGNORE_USER_ID", "xxxxx,xxxxx").split(",")
+        self.IGNORE_USER_ID = [uid.strip() for uid in os.getenv("IGNORE_USER_ID", "xxxxx,xxxxx").split(",") if uid.strip()]
         self.QR_CODE_LOGIN_WAIT_COUNT = int(os.getenv("QR_CODE_LOGIN_WAIT_COUNT", 7))
         self.QR_CODE_LOGIN_WAIT_TIME_INTERVAL_UNIT = int(os.getenv("QR_CODE_LOGIN_WAIT_TIME_INTERVAL_UNIT", 10))
-        # 解析用户名映射: USER_NAMES=户号1:用户名1,户号2:用户名2
+        # 用户名映射: 由 _get_user_ids 从网站下拉框自动填充
         self._user_name_map = {}
-        raw_names = os.getenv("USER_NAMES", "")
-        if raw_names:
-            for pair in raw_names.split(","):
-                if ":" in pair:
-                    uid, name = pair.split(":", 1)
-                    self._user_name_map[uid.strip()] = name.strip()
         # 本地运行用更短的步骤等待
         self._step_wait = 2 if 'PYTHON_IN_DOCKER' not in os.environ else self.RETRY_WAIT_TIME_OFFSET_UNIT
         logging.info(f"DataFetcher 初始化完成: 用户={username}, 步骤等待={self._step_wait}s, "
@@ -563,6 +557,7 @@ class DataFetcher:
                 current_userid = self._get_current_userid(driver)
                 if current_userid in self.IGNORE_USER_ID:
                     logging.info(f"用户 {current_userid} 在忽略列表中, 跳过")
+                    self._cleanup_ignored_user(current_userid)
                     continue
                 else:
                     logging.info(f"当前用户: {current_userid}, 开始获取用电数据...")
@@ -673,17 +668,24 @@ class DataFetcher:
         else:
             logging.info(f"[{user_id}] 电费余额: {balance} 元")
 
-        # 尝试通过 Vue state 获取增强余额
+        # 尝试通过 Vue state 获取增强余额和用户名
         enhanced_balance = None
         user_name = self._user_name_map.get(user_id, "")
-        if user_name:
-            logging.info(f"[{user_id}] 用户名: {user_name}")
         if self.db is not None:
             try:
                 components = vue_state.selected_vue_data(driver)
                 enhanced_balance = vue_state.normalize_balance(components)
+                # 如果用户名为空，从 Vue state 补充
+                if not user_name:
+                    user_info = vue_state.normalize_user_info(components)
+                    user_name = user_info.get("user_name", "")
+                    if user_name:
+                        self._user_name_map[user_id] = user_name
+                        logging.info(f"[{user_id}] 从 Vue state 获取用户名: {user_name}")
             except Exception as e:
                 logging.warning(f"[{user_id}] 增强余额获取失败: {e}")
+        if user_name:
+            logging.info(f"[{user_id}] 用户名: {user_name}")
 
         logging.info(f"[{user_id}] 正在切换到用电量页面...")
         driver.get(ELECTRIC_USAGE_URL)
@@ -694,53 +696,103 @@ class DataFetcher:
             logging.warning(f"[{user_id}] 用电量页面用户切换失败 (非致命): {e}")
         time.sleep(self._step_wait)
 
-        logging.info(f"[{user_id}] 正在获取年度用电数据...")
-        yearly_usage, yearly_charge = self._get_yearly_data(driver)
-        if yearly_usage is None:
-            logging.error(f"[{user_id}] 获取年度用电量失败")
-        else:
-            logging.info(f"[{user_id}] 年度用电量: {yearly_usage} kWh")
-        if yearly_charge is None:
-            logging.error(f"[{user_id}] 获取年度电费失败")
-        else:
-            logging.info(f"[{user_id}] 年度电费: {yearly_charge} 元")
-
-        logging.info(f"[{user_id}] 正在获取月度用电数据...")
-        month, month_usage, month_charge = self._get_month_usage(driver)
-        if month is None:
-            logging.error(f"[{user_id}] 获取月度用电数据失败")
-        else:
-            for m in range(len(month)):
-                logging.info(f"[{user_id}] {month[m]}: 用电 {month_usage[m]} kWh, 电费 {month_charge[m]} 元")
-
-        logging.info(f"[{user_id}] 正在获取每日用电量...")
-        last_daily_date, last_daily_usage = self._get_yesterday_usage(driver)
-        if last_daily_usage is None:
-            logging.error(f"[{user_id}] 获取每日用电量失败")
-        else:
-            logging.info(f"[{user_id}] 最近用电: {last_daily_date} 用电 {last_daily_usage} kWh")
-
-        # 尝试通过 Vue state 获取分时电量
+        # ---- Vue state 优先提取所有数据 ----
         tou_data = None
+        vue_daily_date, vue_daily_usage = None, None
+        vue_yearly_usage, vue_yearly_charge = None, None
+        vue_months, vue_month_usages, vue_month_charges = None, None, None
+
         if self.db is not None:
             try:
                 components = vue_state.selected_vue_data(driver)
                 usage_info = vue_state.normalize_usage(components)
                 tou_data = usage_info
-                logging.info(f"[{user_id}] Vue state 分时数据: 年度={usage_info.get('year')}, "
-                             f"月数据={len(usage_info.get('months', []))}条, "
-                             f"日数据={len(usage_info.get('daily', []))}条")
-                # 打印 Vue state 日数据详情
-                if usage_info.get("daily"):
-                    for d in usage_info["daily"][:7]:
-                        logging.info(f"  [日数据] {d.get('date')}: "
-                                     f"总={d.get('total_usage')}kWh, "
-                                     f"谷={d.get('valley_usage')}, 平={d.get('flat_usage')}, "
-                                     f"峰={d.get('peak_usage')}, 尖={d.get('tip_usage')}")
-                    if len(usage_info["daily"]) > 7:
-                        logging.info(f"  ... 还有 {len(usage_info['daily']) - 7} 条日数据")
+
+                # 从 Vue state 提取日用电量
+                daily_list = usage_info.get("daily", [])
+                logging.info(f"[{user_id}] [分时电量] 年度={usage_info.get('year')}, "
+                             f"已获取 {len(usage_info.get('months', []))} 个月的月度分时数据, "
+                             f"{len(daily_list)} 天的日分时数据")
+                if daily_list:
+                    # 取最新一天的数据
+                    latest = daily_list[0]
+                    vue_daily_date = latest.get("date")
+                    vue_daily_usage = latest.get("total_usage")
+                    logging.info(f"[{user_id}] [日分时] 最新: {vue_daily_date} "
+                                 f"总={vue_daily_usage}kWh, "
+                                 f"谷={latest.get('valley_usage', 0)}, 平={latest.get('flat_usage', 0)}, "
+                                 f"峰={latest.get('peak_usage', 0)}, 尖={latest.get('tip_usage', 0)}")
+                    if len(daily_list) > 1:
+                        for d in daily_list[1:min(7, len(daily_list))]:
+                            logging.info(f"[{user_id}] [日分时] {d.get('date')}: "
+                                         f"总={d.get('total_usage')}kWh, "
+                                         f"谷={d.get('valley_usage', 0)}, 平={d.get('flat_usage', 0)}, "
+                                         f"峰={d.get('peak_usage', 0)}, 尖={d.get('tip_usage', 0)}")
+                        if len(daily_list) > 7:
+                            logging.info(f"[{user_id}] [日分时] ... 还有 {len(daily_list) - 7} 条日数据")
+
+                # 从 Vue state 提取年度数据
+                vue_yearly_usage = usage_info.get("yearly_usage")
+                vue_yearly_charge = usage_info.get("yearly_charge")
+
+                # 从 Vue state 提取月度数据
+                months_info = usage_info.get("months", [])
+                if months_info:
+                    vue_months = [m.get("month", "") for m in months_info]
+                    vue_month_usages = [m.get("total_usage") for m in months_info]
+                    vue_month_charges = [m.get("total_charge") for m in months_info]
             except Exception as e:
-                logging.warning(f"[{user_id}] Vue state 分时数据获取失败: {e}")
+                logging.warning(f"[{user_id}] 分时电量数据获取失败: {e}")
+
+        # 从电费电量查询页面尝试获取余额 (作为补充)
+        if self.db is not None and (balance is None or enhanced_balance is None):
+            try:
+                components = vue_state.selected_vue_data(driver)
+                elec_bal = vue_state.normalize_electric_balance(components)
+                if elec_bal.get("balance") is not None and balance is None:
+                    balance = elec_bal["balance"]
+                    logging.info(f"[{user_id}] 从用电量页面获取余额: {balance} 元")
+            except Exception as e:
+                logging.debug(f"[{user_id}] 用电量页面余额获取失败: {e}")
+
+        # ---- DOM 方式获取数据 (Vue state 的补充) ----
+        logging.info(f"[{user_id}] 正在获取年度用电数据...")
+        yearly_usage, yearly_charge = self._get_yearly_data(driver)
+        if yearly_usage is None:
+            yearly_usage = vue_yearly_usage
+        if yearly_charge is None:
+            yearly_charge = vue_yearly_charge
+        if yearly_usage is not None:
+            logging.info(f"[{user_id}] 年度用电量: {yearly_usage} kWh")
+        else:
+            logging.warning(f"[{user_id}] 年度用电量获取失败")
+        if yearly_charge is not None:
+            logging.info(f"[{user_id}] 年度电费: {yearly_charge} 元")
+        else:
+            logging.warning(f"[{user_id}] 年度电费获取失败")
+
+        logging.info(f"[{user_id}] 正在获取月度用电数据...")
+        month, month_usage, month_charge = self._get_month_usage(driver)
+        if month is None:
+            month = vue_months
+            month_usage = vue_month_usages
+            month_charge = vue_month_charges
+        if month is not None:
+            for m in range(len(month)):
+                logging.info(f"[{user_id}] {month[m]}: 用电 {month_usage[m]} kWh, 电费 {month_charge[m]} 元")
+        else:
+            logging.warning(f"[{user_id}] 月度用电数据获取失败")
+
+        logging.info(f"[{user_id}] 正在获取每日用电量...")
+        last_daily_date, last_daily_usage = self._get_yesterday_usage(driver)
+        if last_daily_usage is None:
+            # DOM 失败时使用 Vue state 数据
+            last_daily_date = vue_daily_date
+            last_daily_usage = vue_daily_usage
+        if last_daily_usage is not None:
+            logging.info(f"[{user_id}] 最近用电: {last_daily_date} 用电 {last_daily_usage} kWh")
+        else:
+            logging.warning(f"[{user_id}] 每日用电量获取失败 (DOM 和分时数据均未获取到)")
 
         # 尝试获取电费账单明细（月度分时）
         bill_tou_data = None
@@ -776,10 +828,22 @@ class DataFetcher:
 
         return balance, last_daily_date, last_daily_usage, yearly_charge, yearly_usage, month_charge, month_usage, tou_data, enhanced_balance
 
+    def _cleanup_ignored_user(self, user_id: str):
+        """清理忽略用户的数据库旧数据"""
+        if self.db is None:
+            return
+        try:
+            if self.db.connect_user_db(user_id):
+                self.db.delete_user_data(user_id)
+                self.db.close_connect()
+                logging.info(f"[{user_id}] 已清理忽略用户的所有数据库记录")
+        except Exception as e:
+            logging.warning(f"[{user_id}] 清理忽略用户数据失败: {e}")
+
     def _get_user_ids(self, driver):
         """获取用户 ID 列表。优先从 el-dropdown 获取（余额页面），
         失败则从 el-select 获取（用电量页面），最后从页面源码正则匹配。
-        失败则从 el-select 获取（用电量页面），最后从页面源码正则匹配。"""
+        同时收集用户名映射（从下拉选项文本中提取）。"""
         try:
             # 方式一：经典方式 - 从 el-dropdown 下拉框获取
             time.sleep(self._step_wait)
@@ -796,10 +860,16 @@ class DataFetcher:
                     userid_elements = driver.find_element(By.CLASS_NAME, "el-dropdown-menu.el-popper").find_elements(By.TAG_NAME, "li")
                     userid_list = []
                     for element in userid_elements:
-                        matches = re.findall("[0-9]+", element.text)
+                        el_text = element.text.strip()
+                        matches = re.findall("[0-9]+", el_text)
                         if matches:
                             uid = matches[-1]
                             userid_list.append(uid)
+                            # 从文本中提取用户名（格式如 "户号:用户名" 或 "户号 用户名"）
+                            name = el_text.replace(uid, "").strip().lstrip(":").strip()
+                            if name and uid not in self._user_name_map:
+                                self._user_name_map[uid] = name
+                                logging.info(f"从 el-dropdown 获取到用户名: {uid} -> {name}")
                     if userid_list:
                         logging.info(f"从 el-dropdown 获取到 {len(userid_list)} 个用户: {userid_list}")
                         return userid_list
@@ -821,7 +891,10 @@ class DataFetcher:
                     options = driver.find_elements(By.CSS_SELECTOR, ".el-select-dropdown__item")
                     userid_list = []
                     for opt in options:
+                        # 尝试多种方式获取选项文本
                         text = opt.text.strip()
+                        if not text:
+                            text = driver.execute_script("return arguments[0].innerText || arguments[0].textContent || '';", opt).strip()
                         if re.match(r'^\d{4}$', text):
                             continue
                         driver.execute_script("arguments[0].click();", opt)
@@ -830,6 +903,8 @@ class DataFetcher:
                             current_id = self._get_current_userid(driver)
                             if current_id and current_id not in userid_list:
                                 userid_list.append(current_id)
+                                if text and current_id not in self._user_name_map:
+                                    self._user_name_map[current_id] = text
                                 logging.info(f"从 el-select 获取到用户: {current_id} ({text})")
                         except Exception:
                             pass
@@ -850,12 +925,6 @@ class DataFetcher:
             if all_ids:
                 logging.info(f"从页面源码正则匹配到 {len(all_ids)} 个用户: {all_ids}")
                 return all_ids
-
-            logging.error("所有方式均未能获取用户 ID 列表")
-            return []
-        except Exception as e:
-            logging.error(f"获取用户 ID 列表异常: {e}")
-            return []
 
             logging.error("所有方式均未能获取用户 ID 列表")
             return []
@@ -944,7 +1013,7 @@ class DataFetcher:
             last_daily_date = date_element.text
             return last_daily_date, float(usage_element.text)
         except Exception as e:
-            logging.error(f"The yesterday data get failed : {e}")
+            logging.warning(f"[DOM] 获取日用电量失败 (将通过分时数据补充): {e}")
             return None, None
 
     def _get_month_usage(self, driver):
@@ -983,11 +1052,13 @@ class DataFetcher:
 
     # 增加获取每日用电量的函数
     def _get_daily_usage_data(self, driver):
-        """获取每日用电量数据 (7天或30天)，通过 radio 按钮切换，失败时返回空列表"""
+        """获取每日用电量数据 (7天或30天)，通过 radio 按钮切换
+        优先使用 DOM 方式，失败时回退到 Vue state"""
+        fetch_days = int(os.getenv("DAILY_FETCH_DAYS", 7))
+        if fetch_days not in (7, 30):
+            fetch_days = 7
+
         try:
-            fetch_days = int(os.getenv("DAILY_FETCH_DAYS", 7))
-            if fetch_days not in (7, 30):
-                fetch_days = 7
             logging.info(f"正在获取每日用电量数据 (最近 {fetch_days} 天)")
             # 点击"日用电量" tab
             self._click_button(driver, By.XPATH, "//div[@class='el-tabs__nav is-top']/div[@id='tab-second']")
@@ -995,36 +1066,71 @@ class DataFetcher:
 
             # 通过 radio 按钮点击 7天 或 30天
             if fetch_days == 30:
-                try:
-                    radio = driver.find_element(By.XPATH,
-                        "//span[contains(@class,'el-radio__label') and contains(text(),'近30天')]"
-                        "/preceding-sibling::span//input[@class='el-radio__original']")
-                    driver.execute_script("arguments[0].click();", radio)
-                    logging.info("已点击 '近30天' radio 按钮")
-                except Exception:
-                    try:
-                        self._click_button(driver, By.XPATH,
-                            "//*[@id='pane-second']//label[2]//span[@class='el-radio__input']")
-                        logging.info("已点击 '近30天' fallback")
-                    except Exception:
-                        logging.warning("未找到 '近30天' radio, 使用默认数据")
-            time.sleep(self._step_wait * 3)
+                self._click_30day_radio(driver)
+                time.sleep(self._step_wait * 4)
+                # 30天数据可能需要滚动加载
+                self._scroll_table_to_load_all(driver)
 
-            # 等待用电量数据出现（兼容多种滚动类名）
-            usage_element = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+            # 尝试 DOM 方式获取数据
+            date, usages = self._extract_daily_table_data(driver)
+            if date:
+                logging.info(f"[DOM] 成功获取 {len(date)} 天的每日用电量数据")
+                for i in range(len(date)):
+                    logging.info(f"  [每日用电] {date[i]}: 总={usages[i]}kWh")
+                return date, usages
+
+            # DOM 失败时尝试 Vue state fallback
+            logging.info("[DOM] 获取数据为空, 尝试 Vue state 方式...")
+            return self._extract_daily_vue_data(driver)
+        except Exception as e:
+            logging.warning(f"[DOM] 获取每日用电量数据失败: {e}, 尝试 Vue state 方式...")
+            return self._extract_daily_vue_data(driver)
+
+    def _click_30day_radio(self, driver):
+        """点击 '近30天' radio 按钮"""
+        try:
+            radio = driver.find_element(By.XPATH,
+                "//span[contains(@class,'el-radio__label') and contains(text(),'近30天')]"
+                "/preceding-sibling::span//input[@class='el-radio__original']")
+            driver.execute_script("arguments[0].click();", radio)
+            logging.info("已点击 '近30天' radio 按钮")
+        except Exception:
+            try:
+                self._click_button(driver, By.XPATH,
+                    "//*[@id='pane-second']//label[2]//span[@class='el-radio__input']")
+                logging.info("已点击 '近30天' (fallback)")
+            except Exception:
+                logging.warning("未找到 '近30天' radio, 使用默认数据")
+
+    def _scroll_table_to_load_all(self, driver):
+        """滚动表格区域以触发懒加载（30天数据可能需要滚动）"""
+        try:
+            scroll_container = driver.find_element(By.XPATH,
+                "//*[@id='pane-second']//div[contains(@class,'el-table__body-wrapper')]")
+            # 分多次滚动到底部
+            for _ in range(3):
+                driver.execute_script(
+                    "arguments[0].scrollTop = arguments[0].scrollHeight", scroll_container)
+                time.sleep(self._step_wait)
+        except Exception:
+            pass
+
+    def _extract_daily_table_data(self, driver):
+        """从 DOM 表格提取每日用电量数据"""
+        date = []
+        usages = []
+        try:
+            # 等待数据出现
+            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
                 EC.visibility_of_element_located((
                     By.XPATH,
                     "//div[contains(@class,'el-tab-pane')]//div[contains(@class,'el-table__body-wrapper')]"
                     "//table/tbody/tr[1]/td[2]/div"
                 ))
             )
-
-            # 获取用电量数据
             days_element = driver.find_elements(By.XPATH,
                 "//*[@id='pane-second']//div[contains(@class,'el-table__body-wrapper')]"
                 "/table/tbody/tr")
-            date = []
-            usages = []
             for i in days_element:
                 try:
                     day = i.find_element(By.XPATH, "td[1]/div").text
@@ -1034,11 +1140,30 @@ class DataFetcher:
                         date.append(day)
                 except Exception:
                     pass
-            logging.info(f"DOM 方式成功获取 {len(date)} 天的每日用电量数据")
-            return date, usages
+        except Exception:
+            pass
+        return date, usages
+
+    def _extract_daily_vue_data(self, driver):
+        """从 Vue state 提取每日用电量数据 (作为 DOM 方式的 fallback)"""
+        try:
+            components = vue_state.selected_vue_data(driver)
+            usage_info = vue_state.normalize_usage(components)
+            daily_list = usage_info.get("daily", [])
+            if daily_list:
+                date = [d.get("date", "") for d in daily_list if d.get("date")]
+                usages = [str(d.get("total_usage", "")) for d in daily_list if d.get("date")]
+                logging.info(f"[分时数据] 成功获取 {len(date)} 天的每日用电量数据")
+                for d in daily_list:
+                    if d.get("date"):
+                        logging.info(f"  [每日用电] {d.get('date')}: "
+                                     f"总={d.get('total_usage', 0)}kWh, "
+                                     f"谷={d.get('valley_usage', 0)}, 平={d.get('flat_usage', 0)}, "
+                                     f"峰={d.get('peak_usage', 0)}, 尖={d.get('tip_usage', 0)}")
+                return date, usages
         except Exception as e:
-            logging.warning(f"DOM 方式获取每日用电量数据失败: {e}")
-            return [], []
+            logging.warning(f"[分时数据] Vue state 每日用电量获取失败: {e}")
+        return [], []
 
     def _get_daily_tou_data(self, driver):
         """通过展开日用电量表格行获取每日分时电量（谷/平/峰/尖）"""

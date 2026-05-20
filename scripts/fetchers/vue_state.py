@@ -25,6 +25,8 @@ const wantedKeys = [
   'sevenEleList',
   'sevenEleList_t',
   'new_sevenEleList',
+  'thirtyEleList',
+  'thirtyEleList_t',
   'tariffC',
   'start',
   'end',
@@ -37,7 +39,9 @@ const wantedKeys = [
   'NewtotalBillProvince',
   'optionalYearArray',
   'selectYear',
-  'listData'
+  'listData',
+  'yeData',
+  'elecItemData'
 ];
 return Array.from(document.querySelectorAll('*'))
   .map((el, index) => {
@@ -97,7 +101,7 @@ def normalize_usage(components: list[dict[str, Any]]) -> dict[str, Any]:
     month_rows = power_data.get("mothEleList") or _first_data_value(components, "mothData") or []
 
     daily_rows = []
-    for key in ("tableData", "new_sevenEleList", "sevenEleList"):
+    for key in ("tableData", "new_sevenEleList", "sevenEleList", "thirtyEleList"):
         for row in _data_values(components, key):
             if isinstance(row, list) and row and any(
                 item.get("thisVPq") is not None for item in row if isinstance(item, dict)
@@ -106,6 +110,18 @@ def normalize_usage(components: list[dict[str, Any]]) -> dict[str, Any]:
                 break
         if daily_rows:
             break
+
+    # 如果没有分时数据，尝试只有总用电量的日数据
+    if not daily_rows:
+        for key in ("tableData", "new_sevenEleList", "sevenEleList", "thirtyEleList"):
+            for row in _data_values(components, key):
+                if isinstance(row, list) and row and any(
+                    item.get("dayElePq") is not None for item in row if isinstance(item, dict)
+                ):
+                    daily_rows = row
+                    break
+            if daily_rows:
+                break
 
     return {
         "year": str(info.get("year") or _first_data_value(components, "queryYear") or ""),
@@ -144,6 +160,29 @@ def normalize_bill_detail(components: list[dict[str, Any]]) -> dict[str, Any]:
         "tip_usage": _safe_float(pv_qty.get("sharpQty")),
         "raw": bill,
     }
+
+
+def normalize_electric_balance(components: list[dict[str, Any]]) -> dict[str, Any]:
+    """从电费电量查询页面提取余额信息 (兼容预缴费和后缴费账户)."""
+    result = {
+        "balance": None,
+        "amount_due": None,
+        "as_of": None,
+        "user_id": None,
+    }
+    # 从 mixinGetYuEdata 获取余额
+    raw = _first_data_value(components, "mixinGetYuEdata")
+    if isinstance(raw, dict):
+        result["amount_due"] = _safe_float(raw.get("historyOwe"))
+        result["as_of"] = raw.get("amtTime")
+        result["user_id"] = raw.get("consNo")
+    # 从 elecItemData 获取余额
+    elec = _first_data_value(components, "elecItemData")
+    if isinstance(elec, dict):
+        balance_val = _safe_float(elec.get("oweAmt"))
+        if balance_val is not None:
+            result["balance"] = balance_val
+    return result
 
 
 def _first_data_value(components: list[dict[str, Any]], key: str) -> Any:

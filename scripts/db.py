@@ -52,6 +52,9 @@ class DB:
     def cleanup_old_data(self) -> None:
         raise NotImplementedError
 
+    def delete_user_data(self, user_id: str) -> None:
+        raise NotImplementedError
+
     def close_connect(self) -> None:
         raise NotImplementedError
 
@@ -237,7 +240,10 @@ class SqliteDB(DB):
         )
 
     def insert_balance_log(self, data: dict) -> bool:
-        as_of = str(data.get("as_of") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")).strip()
+        # 默认按天去重：同一天多次运行只保留最新一条
+        as_of_raw = data.get("as_of") or datetime.now().strftime("%Y-%m-%d")
+        # 统一截断为日期格式 (YYYY-MM-DD)，避免时间戳导致重复
+        as_of = str(as_of_raw).strip()[:10]
         return self._execute(
             f"""INSERT OR REPLACE INTO {self.BALANCE_TABLE} (user_id, user_name, as_of, balance, amount_due)
                 VALUES (?, ?, ?, ?, ?)""",
@@ -298,6 +304,12 @@ class SqliteDB(DB):
         self._execute(f"DELETE FROM {self.DAILY_TABLE} WHERE user_id=? AND date<?", (self.user_id, cutoff))
         self._execute(f"DELETE FROM {self.BALANCE_TABLE} WHERE user_id=? AND as_of<?", (self.user_id, cutoff))
         logging.info("Cleaned up data older than %s for user %s", cutoff, self.user_id)
+
+    def delete_user_data(self, user_id: str) -> None:
+        for tbl in [self.DAILY_TABLE, self.MONTHLY_TABLE, self.YEARLY_TABLE,
+                     self.BALANCE_TABLE, self.USERS_TABLE]:
+            self._execute(f"DELETE FROM {tbl} WHERE user_id=?", (str(user_id).strip(),))
+        logging.info("Deleted all data for ignored user %s", user_id)
 
     def _execute(self, sql: str, params: tuple = ()) -> bool:
         if self.connect is None:
@@ -518,7 +530,10 @@ class MysqlDB(DB):
         )
 
     def insert_balance_log(self, data: dict) -> bool:
-        as_of = str(data.get("as_of") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")).strip()
+        # 默认按天去重：同一天多次运行只保留最新一条
+        as_of_raw = data.get("as_of") or datetime.now().strftime("%Y-%m-%d")
+        # 统一截断为日期格式 (YYYY-MM-DD)，避免时间戳导致重复
+        as_of = str(as_of_raw).strip()[:10]
         return self._execute(
             f"""REPLACE INTO `{self.BALANCE_TABLE}` (user_id, user_name, as_of, balance, amount_due)
                 VALUES (%s, %s, %s, %s, %s)""",
@@ -557,6 +572,12 @@ class MysqlDB(DB):
         self._execute(f"DELETE FROM `{self.DAILY_TABLE}` WHERE user_id=%s AND date<%s", (self.user_id, cutoff))
         self._execute(f"DELETE FROM `{self.BALANCE_TABLE}` WHERE user_id=%s AND as_of<%s", (self.user_id, cutoff))
         logging.info("Cleaned up data older than %s for user %s", cutoff, self.user_id)
+
+    def delete_user_data(self, user_id: str) -> None:
+        for tbl in [self.DAILY_TABLE, self.MONTHLY_TABLE, self.YEARLY_TABLE,
+                     self.BALANCE_TABLE, self.USERS_TABLE]:
+            self._execute(f"DELETE FROM `{tbl}` WHERE user_id=%s", (str(user_id).strip(),))
+        logging.info("Deleted all data for ignored user %s", user_id)
 
     def _execute(self, sql: str, params: tuple = ()) -> bool:
         if self.connect is None or not self.connect.is_connected():

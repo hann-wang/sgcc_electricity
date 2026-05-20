@@ -6,6 +6,8 @@
 .venv/
 venv/
 
+docs
+
 # Debug / captcha / screenshot output
 pages/
 screenshots/
