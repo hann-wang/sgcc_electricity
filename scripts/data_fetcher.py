@@ -46,6 +46,14 @@ class DataFetcher:
         self.IGNORE_USER_ID = os.getenv("IGNORE_USER_ID", "xxxxx,xxxxx").split(",")
         self.QR_CODE_LOGIN_WAIT_COUNT = int(os.getenv("QR_CODE_LOGIN_WAIT_COUNT", 7))
         self.QR_CODE_LOGIN_WAIT_TIME_INTERVAL_UNIT = int(os.getenv("QR_CODE_LOGIN_WAIT_TIME_INTERVAL_UNIT", 10))
+        # 解析用户名映射: USER_NAMES=户号1:用户名1,户号2:用户名2
+        self._user_name_map = {}
+        raw_names = os.getenv("USER_NAMES", "")
+        if raw_names:
+            for pair in raw_names.split(","):
+                if ":" in pair:
+                    uid, name = pair.split(":", 1)
+                    self._user_name_map[uid.strip()] = name.strip()
         # 本地运行用更短的步骤等待
         self._step_wait = 2 if 'PYTHON_IN_DOCKER' not in os.environ else self.RETRY_WAIT_TIME_OFFSET_UNIT
         logging.info(f"DataFetcher 初始化完成: 用户={username}, 步骤等待={self._step_wait}s, "
@@ -528,7 +536,10 @@ class DataFetcher:
             driver.quit()
             return
 
-        logging.info(f"登录成功! 当前页面: {LOGIN_URL}")
+        logging.info(f"登录成功! 当前页面: {driver.current_url}")
+        time.sleep(self._step_wait)
+        # 导航到电费余额页面（某些版本有 el-dropdown 用户切换）
+        driver.get(BALANCE_URL)
         time.sleep(self._step_wait)
         logging.info("正在获取用户 ID 列表...")
         user_id_list = self._get_user_ids(driver)
@@ -664,20 +675,23 @@ class DataFetcher:
 
         # 尝试通过 Vue state 获取增强余额
         enhanced_balance = None
+        user_name = self._user_name_map.get(user_id, "")
+        if user_name:
+            logging.info(f"[{user_id}] 用户名: {user_name}")
         if self.db is not None:
             try:
                 components = vue_state.selected_vue_data(driver)
                 enhanced_balance = vue_state.normalize_balance(components)
-                logging.info(f"[{user_id}] 增强余额信息: 预付费={enhanced_balance.get('prepay_balance')}, "
-                             f"预估电费={enhanced_balance.get('estimated_amount')}, "
-                             f"历史欠费={enhanced_balance.get('history_owe')}")
             except Exception as e:
                 logging.warning(f"[{user_id}] 增强余额获取失败: {e}")
 
         logging.info(f"[{user_id}] 正在切换到用电量页面...")
         driver.get(ELECTRIC_USAGE_URL)
         time.sleep(self._step_wait)
-        self._choose_current_userid(driver, userid_index)
+        try:
+            self._choose_current_userid(driver, userid_index)
+        except Exception as e:
+            logging.warning(f"[{user_id}] 用电量页面用户切换失败 (非致命): {e}")
         time.sleep(self._step_wait)
 
         logging.info(f"[{user_id}] 正在获取年度用电数据...")
@@ -716,6 +730,15 @@ class DataFetcher:
                 logging.info(f"[{user_id}] Vue state 分时数据: 年度={usage_info.get('year')}, "
                              f"月数据={len(usage_info.get('months', []))}条, "
                              f"日数据={len(usage_info.get('daily', []))}条")
+                # 打印 Vue state 日数据详情
+                if usage_info.get("daily"):
+                    for d in usage_info["daily"][:7]:
+                        logging.info(f"  [日数据] {d.get('date')}: "
+                                     f"总={d.get('total_usage')}kWh, "
+                                     f"谷={d.get('valley_usage')}, 平={d.get('flat_usage')}, "
+                                     f"峰={d.get('peak_usage')}, 尖={d.get('tip_usage')}")
+                    if len(usage_info["daily"]) > 7:
+                        logging.info(f"  ... 还有 {len(usage_info['daily']) - 7} 条日数据")
             except Exception as e:
                 logging.warning(f"[{user_id}] Vue state 分时数据获取失败: {e}")
 
@@ -737,7 +760,7 @@ class DataFetcher:
                 date_list, usage_list,
                 month, month_usage, month_charge,
                 yearly_charge, yearly_usage,
-                tou_data, bill_tou_data,
+                tou_data, bill_tou_data, user_name,
             )
         else:
             logging.info(f"[{user_id}] 未配置数据库, 跳过数据存储")
@@ -754,35 +777,90 @@ class DataFetcher:
         return balance, last_daily_date, last_daily_usage, yearly_charge, yearly_usage, month_charge, month_usage, tou_data, enhanced_balance
 
     def _get_user_ids(self, driver):
+        """获取用户 ID 列表。优先从 el-dropdown 获取（余额页面），
+        失败则从 el-select 获取（用电量页面），最后从页面源码正则匹配。
+        失败则从 el-select 获取（用电量页面），最后从页面源码正则匹配。"""
         try:
-            # 刷新网页
-            driver.refresh()
-            time.sleep(self._step_wait * 2)
-            element = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.presence_of_element_located((By.CLASS_NAME, 'el-dropdown')))
-            # click roll down button for user id
-            self._click_button(driver, By.XPATH, "//div[@class='el-dropdown']/span")
-            logging.debug(f'''self._click_button(driver, By.XPATH, "//div[@class='el-dropdown']/span")''')
+            # 方式一：经典方式 - 从 el-dropdown 下拉框获取
             time.sleep(self._step_wait)
-            # wait for roll down menu displayed
-            target = driver.find_element(By.CLASS_NAME, "el-dropdown-menu.el-popper").find_element(By.TAG_NAME, "li")
-            logging.debug(f'''target = driver.find_element(By.CLASS_NAME, "el-dropdown-menu.el-popper").find_element(By.TAG_NAME, "li")''')
-            time.sleep(self._step_wait)
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
-            time.sleep(self._step_wait)
-            logging.debug(f'''WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))''')
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
-                EC.text_to_be_present_in_element((By.XPATH, "//ul[@class='el-dropdown-menu el-popper']/li"), ":"))
-            time.sleep(self._step_wait)
+            dropdowns = driver.find_elements(By.CLASS_NAME, 'el-dropdown')
+            if dropdowns:
+                self._click_button(driver, By.XPATH, "//div[@class='el-dropdown']/span")
+                time.sleep(self._step_wait)
+                try:
+                    target = driver.find_element(By.CLASS_NAME, "el-dropdown-menu.el-popper").find_element(By.TAG_NAME, "li")
+                    WebDriverWait(driver, 10).until(EC.visibility_of(target))
+                    WebDriverWait(driver, 10).until(
+                        EC.text_to_be_present_in_element((By.XPATH, "//ul[@class='el-dropdown-menu el-popper']/li"), ":"))
+                    time.sleep(self._step_wait)
+                    userid_elements = driver.find_element(By.CLASS_NAME, "el-dropdown-menu.el-popper").find_elements(By.TAG_NAME, "li")
+                    userid_list = []
+                    for element in userid_elements:
+                        matches = re.findall("[0-9]+", element.text)
+                        if matches:
+                            uid = matches[-1]
+                            userid_list.append(uid)
+                    if userid_list:
+                        logging.info(f"从 el-dropdown 获取到 {len(userid_list)} 个用户: {userid_list}")
+                        return userid_list
+                except Exception as e:
+                    logging.debug(f"el-dropdown 获取失败, 尝试其他方式: {e}")
 
-            # get user id one by one
-            userid_elements = driver.find_element(By.CLASS_NAME, "el-dropdown-menu.el-popper").find_elements(By.TAG_NAME, "li")
-            userid_list = []
-            for element in userid_elements:
-                userid_list.append(re.findall("[0-9]+", element.text)[-1])
-            return userid_list
+            # 方式二：从 el-select 下拉框获取（用电量页面）
+            try:
+                select_inputs = driver.find_elements(By.CSS_SELECTOR, ".houseNum .el-select .el-input__inner")
+                if not select_inputs:
+                    driver.get(ELECTRIC_USAGE_URL)
+                    time.sleep(self._step_wait * 2)
+                    select_inputs = driver.find_elements(By.CSS_SELECTOR, ".houseNum .el-select .el-input__inner")
+                
+                if select_inputs:
+                    driver.execute_script("arguments[0].click();", select_inputs[0])
+                    time.sleep(self._step_wait)
+                    
+                    options = driver.find_elements(By.CSS_SELECTOR, ".el-select-dropdown__item")
+                    userid_list = []
+                    for opt in options:
+                        text = opt.text.strip()
+                        if re.match(r'^\d{4}$', text):
+                            continue
+                        driver.execute_script("arguments[0].click();", opt)
+                        time.sleep(self._step_wait)
+                        try:
+                            current_id = self._get_current_userid(driver)
+                            if current_id and current_id not in userid_list:
+                                userid_list.append(current_id)
+                                logging.info(f"从 el-select 获取到用户: {current_id} ({text})")
+                        except Exception:
+                            pass
+                        select_inputs = driver.find_elements(By.CSS_SELECTOR, ".houseNum .el-select .el-input__inner")
+                        if select_inputs:
+                            driver.execute_script("arguments[0].click();", select_inputs[0])
+                            time.sleep(self._step_wait)
+                    
+                    if userid_list:
+                        logging.info(f"从 el-select 获取到 {len(userid_list)} 个用户: {userid_list}")
+                        return userid_list
+            except Exception as e:
+                logging.debug(f"el-select 获取失败: {e}")
+
+            # 方式三：从页面源码正则匹配所有13位户号
+            page_source = driver.page_source or ""
+            all_ids = list(set(re.findall(r'\b(\d{13})\b', page_source)))
+            if all_ids:
+                logging.info(f"从页面源码正则匹配到 {len(all_ids)} 个用户: {all_ids}")
+                return all_ids
+
+            logging.error("所有方式均未能获取用户 ID 列表")
+            return []
         except Exception as e:
-            logging.error(
-                f"Webdriver quit abnormly, reason: {e}. get user_id list failed.")
+            logging.error(f"获取用户 ID 列表异常: {e}")
+            return []
+
+            logging.error("所有方式均未能获取用户 ID 列表")
+            return []
+        except Exception as e:
+            logging.error(f"获取用户 ID 列表异常: {e}")
             return []
 
     def _get_electric_balance(self, driver):
@@ -849,18 +927,21 @@ class DataFetcher:
     def _get_yesterday_usage(self, driver):
         """获取最近一次用电量"""
         try:
-            # 点击日用电量
+            # 点击日用电量 tab
             self._click_button(driver, By.XPATH, "//div[@class='el-tabs__nav is-top']/div[@id='tab-second']")
-            time.sleep(self._step_wait)
-            # wait for data displayed
-            usage_element = driver.find_element(By.XPATH,
-                                                "//div[@class='el-tab-pane dayd']//div[@class='el-table__body-wrapper is-scrolling-none']/table/tbody/tr[1]/td[2]/div")
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(usage_element)) # 等待用电量出现
-
-            # 增加是哪一天
+            time.sleep(self._step_wait * 3)
+            # 等待数据表格出现（兼容多种滚动类名）
+            usage_element = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                EC.visibility_of_element_located((
+                    By.XPATH,
+                    "//div[contains(@class,'el-tab-pane')]//div[contains(@class,'el-table__body-wrapper')]"
+                    "/table/tbody/tr[1]/td[2]/div"
+                ))
+            )
             date_element = driver.find_element(By.XPATH,
-                                                "//div[@class='el-tab-pane dayd']//div[@class='el-table__body-wrapper is-scrolling-none']/table/tbody/tr[1]/td[1]/div")
-            last_daily_date = date_element.text # 获取最近一次用电量的日期
+                                                "//div[contains(@class,'el-tab-pane')]//div[contains(@class,'el-table__body-wrapper')]"
+                                                "/table/tbody/tr[1]/td[1]/div")
+            last_daily_date = date_element.text
             return last_daily_date, float(usage_element.text)
         except Exception as e:
             logging.error(f"The yesterday data get failed : {e}")
@@ -902,50 +983,111 @@ class DataFetcher:
 
     # 增加获取每日用电量的函数
     def _get_daily_usage_data(self, driver):
-        """获取每日用电量数据 (7天或30天)"""
-        fetch_days = int(os.getenv("DAILY_FETCH_DAYS", 7))
-        if fetch_days not in (7, 30):
-            fetch_days = 7
-        logging.info(f"正在获取每日用电量数据 (最近 {fetch_days} 天)")
-        self._click_button(driver, By.XPATH, "//div[@class='el-tabs__nav is-top']/div[@id='tab-second']")
-        time.sleep(self._step_wait)
+        """获取每日用电量数据 (7天或30天)，通过 radio 按钮切换，失败时返回空列表"""
+        try:
+            fetch_days = int(os.getenv("DAILY_FETCH_DAYS", 7))
+            if fetch_days not in (7, 30):
+                fetch_days = 7
+            logging.info(f"正在获取每日用电量数据 (最近 {fetch_days} 天)")
+            # 点击"日用电量" tab
+            self._click_button(driver, By.XPATH, "//div[@class='el-tabs__nav is-top']/div[@id='tab-second']")
+            time.sleep(self._step_wait * 3)
 
-        # 7 天在第一个 label, 30 天 开通了智能缴费之后才会出现在第二个, (sb sgcc)
-        if fetch_days == 7:
-            self._click_button(driver, By.XPATH, "//*[@id='pane-second']/div[1]/div/label[1]/span[1]")
-        elif fetch_days == 30:
-            self._click_button(driver, By.XPATH, "//*[@id='pane-second']/div[1]/div/label[2]/span[1]")
+            # 通过 radio 按钮点击 7天 或 30天
+            if fetch_days == 30:
+                try:
+                    radio = driver.find_element(By.XPATH,
+                        "//span[contains(@class,'el-radio__label') and contains(text(),'近30天')]"
+                        "/preceding-sibling::span//input[@class='el-radio__original']")
+                    driver.execute_script("arguments[0].click();", radio)
+                    logging.info("已点击 '近30天' radio 按钮")
+                except Exception:
+                    try:
+                        self._click_button(driver, By.XPATH,
+                            "//*[@id='pane-second']//label[2]//span[@class='el-radio__input']")
+                        logging.info("已点击 '近30天' fallback")
+                    except Exception:
+                        logging.warning("未找到 '近30天' radio, 使用默认数据")
+            time.sleep(self._step_wait * 3)
 
-        time.sleep(self._step_wait)
+            # 等待用电量数据出现（兼容多种滚动类名）
+            usage_element = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                EC.visibility_of_element_located((
+                    By.XPATH,
+                    "//div[contains(@class,'el-tab-pane')]//div[contains(@class,'el-table__body-wrapper')]"
+                    "//table/tbody/tr[1]/td[2]/div"
+                ))
+            )
 
-        # 等待用电量的数据出现
-        usage_element = driver.find_element(By.XPATH,
-                                            "//div[@class='el-tab-pane dayd']//div[@class='el-table__body-wrapper is-scrolling-none']/table/tbody/tr[1]/td[2]/div")
-        WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(usage_element))
+            # 获取用电量数据
+            days_element = driver.find_elements(By.XPATH,
+                "//*[@id='pane-second']//div[contains(@class,'el-table__body-wrapper')]"
+                "/table/tbody/tr")
+            date = []
+            usages = []
+            for i in days_element:
+                try:
+                    day = i.find_element(By.XPATH, "td[1]/div").text
+                    usage = i.find_element(By.XPATH, "td[2]/div").text
+                    if usage != "":
+                        usages.append(usage)
+                        date.append(day)
+                except Exception:
+                    pass
+            logging.info(f"DOM 方式成功获取 {len(date)} 天的每日用电量数据")
+            return date, usages
+        except Exception as e:
+            logging.warning(f"DOM 方式获取每日用电量数据失败: {e}")
+            return [], []
 
-        # 获取用电量的数据
-        days_element = driver.find_elements(By.XPATH,
-                                            "//*[@id='pane-second']/div[2]/div[2]/div[1]/div[3]/table/tbody/tr")  # 用电量值列表
-        date = []
-        usages = []
-        # 将用电量保存为字典
-        for i in days_element:
-            day = i.find_element(By.XPATH, "td[1]/div").text
-            usage = i.find_element(By.XPATH, "td[2]/div").text
-            if usage != "":
-                usages.append(usage)
-                date.append(day)
-            else:
-                logging.info(f"日期 {day} 的用电量为空, 跳过")
-        logging.info(f"成功获取 {len(date)} 天的每日用电量数据")
-        return date, usages
+    def _get_daily_tou_data(self, driver):
+        """通过展开日用电量表格行获取每日分时电量（谷/平/峰/尖）"""
+        tou_rows = []
+        try:
+            # 找到所有展开图标并逐个点击
+            expand_icons = driver.find_elements(By.CSS_SELECTOR,
+                ".el-table__expand-icon")
+            for icon in expand_icons:
+                try:
+                    driver.execute_script("arguments[0].click();", icon)
+                    time.sleep(0.5)
+                except Exception:
+                    continue
+
+            time.sleep(1)
+
+            # 读取展开行中的分时电量
+            expanded_cells = driver.find_elements(By.CSS_SELECTOR,
+                ".el-table__expanded-cell .drop-box-left")
+            for cell in expanded_cells:
+                tou = {"valley_usage": 0.0, "flat_usage": 0.0, "peak_usage": 0.0, "tip_usage": 0.0}
+                paragraphs = cell.find_elements(By.TAG_NAME, "p")
+                for p in paragraphs:
+                    text = p.text
+                    try:
+                        num_el = p.find_element(By.CSS_SELECTOR, ".num")
+                        val = float(num_el.text)
+                    except Exception:
+                        continue
+                    if "谷" in text:
+                        tou["valley_usage"] = val
+                    elif "平" in text:
+                        tou["flat_usage"] = val
+                    elif "峰" in text:
+                        tou["peak_usage"] = val
+                    elif "尖" in text:
+                        tou["tip_usage"] = val
+                tou_rows.append(tou)
+            logging.info(f"通过展开行获取到 {len(tou_rows)} 条分时电量数据")
+        except Exception as e:
+            logging.warning(f"获取展开行分时电量失败: {e}")
+        return tou_rows
 
     def _get_bill_detail(self, driver, user_id):
-        """通过电费账单明细页面获取月度分时电量"""
-        logging.info(f"[{user_id}] 尝试获取电费账单分时数据...")
+        """从用电量页面通过 Vue state 获取月度分时电量"""
+        logging.info(f"[{user_id}] 尝试从当前页面获取电费账单分时数据...")
         try:
-            driver.get(BILL_SUMMARY_URL)
-            time.sleep(self._step_wait * 2)
+            # 不再跳转到 403 的 BILL_SUMMARY_URL, 直接从当前页面提取
             components = vue_state.selected_vue_data(driver)
             bill = vue_state.normalize_bill_detail(components)
             if bill.get("month"):
@@ -964,26 +1106,22 @@ class DataFetcher:
                         date_list, usage_list,
                         month, month_usage, month_charge,
                         yearly_charge, yearly_usage,
-                        tou_data=None, bill_tou_data=None):
+                        tou_data=None, bill_tou_data=None, user_name=""):
         if not self.db.connect_user_db(user_id):
             logging.error(f"[{user_id}] 数据库连接失败, 数据未写入")
             return
 
         try:
-            self.db.upsert_user(user_id, self._username)
-            logging.info(f"[{user_id}] 用户信息已更新")
+            self.db.upsert_user(user_id, self._username, user_name)
+            logging.info(f"[{user_id}] 用户信息已更新 (user_name={user_name})")
 
             # 写入余额日志
             if balance is not None:
-                bal_data = {"balance": balance}
+                bal_data = {"balance": balance, "user_name": user_name}
                 if enhanced_balance:
                     bal_data.update({
                         "as_of": enhanced_balance.get("as_of"),
-                        "prepay_balance": enhanced_balance.get("prepay_balance"),
-                        "estimated_amount": enhanced_balance.get("estimated_amount"),
-                        "history_owe": enhanced_balance.get("history_owe"),
-                        "penalty": enhanced_balance.get("penalty"),
-                        "total_usage": enhanced_balance.get("total_usage"),
+                        "amount_due": enhanced_balance.get("amount_due"),
                     })
                 self.db.insert_balance_log(bal_data)
                 logging.info(f"[{user_id}] 余额日志已写入: {balance} 元")
@@ -995,6 +1133,7 @@ class DataFetcher:
                         self.db.insert_daily_data({
                             "date": date_list[i],
                             "total_usage": float(usage_list[i]),
+                            "user_name": user_name,
                         })
                     except Exception as e:
                         logging.debug(f"[{user_id}] 日用电 {date_list[i]} 写入失败 (可能已存在): {e}")
@@ -1005,6 +1144,7 @@ class DataFetcher:
                 tou_count = 0
                 for row in tou_data["daily"]:
                     try:
+                        row["user_name"] = user_name
                         self.db.insert_daily_data(row)
                         tou_count += 1
                     except Exception as e:
@@ -1013,12 +1153,18 @@ class DataFetcher:
 
             # 写入月度用电量（DOM 方式）
             if month:
+                cur_year = str(datetime.now().year)
                 for i in range(len(month)):
                     try:
+                        # 将 "1月1日-1月31日" 格式转为 "2026-01"
+                        m_text = month[i]
+                        m_num = re.search(r'(\d+)月', m_text)
+                        m_formatted = f"{cur_year}-{int(m_num.group(1)):02d}" if m_num else m_text
                         self.db.insert_monthly_data({
-                            "month": month[i],
+                            "month": m_formatted,
                             "total_usage": float(month_usage[i]) if month_usage[i] else None,
                             "total_charge": float(month_charge[i]) if month_charge[i] else None,
+                            "user_name": user_name,
                         })
                     except Exception as e:
                         logging.debug(f"[{user_id}] 月度 {month[i]} 写入失败: {e}")
@@ -1028,6 +1174,7 @@ class DataFetcher:
             if tou_data and tou_data.get("months"):
                 for m_row in tou_data["months"]:
                     try:
+                        m_row["user_name"] = user_name
                         self.db.insert_monthly_data(m_row)
                     except Exception as e:
                         logging.debug(f"[{user_id}] 分时月度 {m_row.get('month')} 写入失败: {e}")
@@ -1044,6 +1191,7 @@ class DataFetcher:
                         "flat_usage": bill_tou_data.get("flat_usage", 0),
                         "peak_usage": bill_tou_data.get("peak_usage", 0),
                         "tip_usage": bill_tou_data.get("tip_usage", 0),
+                        "user_name": user_name,
                     })
                     logging.info(f"[{user_id}] 账单分时月度数据已写入: {bill_tou_data['month']}")
                 except Exception as e:
@@ -1053,7 +1201,7 @@ class DataFetcher:
             year = str(datetime.now().year)
             if yearly_usage is not None or yearly_charge is not None:
                 try:
-                    year_data = {"year": year}
+                    year_data = {"year": year, "user_name": user_name}
                     if yearly_usage is not None:
                         year_data["total_usage"] = float(yearly_usage)
                     if yearly_charge is not None:
@@ -1070,6 +1218,7 @@ class DataFetcher:
                         "year": tou_data["year"],
                         "total_usage": tou_data.get("yearly_usage"),
                         "total_charge": tou_data.get("yearly_charge"),
+                        "user_name": user_name,
                     })
                     logging.info(f"[{user_id}] Vue state 年度数据已写入: {tou_data['year']}")
                 except Exception as e:

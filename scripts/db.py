@@ -1,13 +1,14 @@
 """Unified database module with 5 tables for SGCC electricity data.
 
 Tables:
-    users         - user account info (user_id, phone_number, timestamps)
+    users         - user account info (user_id, phone_number, user_name, timestamps)
     daily_usage   - daily electricity usage with TOU breakdown (valley/flat/peak/tip)
     monthly_usage - monthly electricity usage with TOU breakdown
     yearly_usage  - yearly electricity usage with TOU breakdown
     balance_log   - balance history with enhanced info (prepay, estimated, owe, penalty)
 
 Field naming conventions:
+    user_name     - user/consumer name from State Grid
     total_usage   - total electricity usage in kWh
     total_charge  - total charge in CNY
     valley_usage  - valley/low period usage in kWh
@@ -45,7 +46,7 @@ class DB:
     def insert_balance_log(self, data: dict) -> bool:
         raise NotImplementedError
 
-    def upsert_user(self, user_id: str, phone_number: str = "") -> bool:
+    def upsert_user(self, user_id: str, phone_number: str = "", user_name: str = "") -> bool:
         raise NotImplementedError
 
     def cleanup_old_data(self) -> None:
@@ -101,12 +102,14 @@ class SqliteDB(DB):
             CREATE TABLE IF NOT EXISTS {self.USERS_TABLE} (
                 user_id TEXT PRIMARY KEY NOT NULL,
                 phone_number TEXT NOT NULL DEFAULT '',
+                user_name TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS {self.DAILY_TABLE} (
                 user_id TEXT NOT NULL,
+                user_name TEXT NOT NULL DEFAULT '',
                 date TEXT NOT NULL,
                 total_usage REAL NOT NULL DEFAULT 0,
                 valley_usage REAL NOT NULL DEFAULT 0,
@@ -120,6 +123,7 @@ class SqliteDB(DB):
 
             CREATE TABLE IF NOT EXISTS {self.MONTHLY_TABLE} (
                 user_id TEXT NOT NULL,
+                user_name TEXT NOT NULL DEFAULT '',
                 month TEXT NOT NULL,
                 total_usage REAL NOT NULL DEFAULT 0,
                 total_charge REAL,
@@ -134,6 +138,7 @@ class SqliteDB(DB):
 
             CREATE TABLE IF NOT EXISTS {self.YEARLY_TABLE} (
                 user_id TEXT NOT NULL,
+                user_name TEXT NOT NULL DEFAULT '',
                 year TEXT NOT NULL,
                 total_usage REAL NOT NULL DEFAULT 0,
                 total_charge REAL,
@@ -148,13 +153,10 @@ class SqliteDB(DB):
 
             CREATE TABLE IF NOT EXISTS {self.BALANCE_TABLE} (
                 user_id TEXT NOT NULL,
+                user_name TEXT NOT NULL DEFAULT '',
                 as_of TEXT NOT NULL,
                 balance REAL,
-                prepay_balance REAL,
-                estimated_amount REAL,
-                history_owe REAL,
-                penalty REAL,
-                total_usage REAL,
+                amount_due REAL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (user_id, as_of)
             );
@@ -166,25 +168,27 @@ class SqliteDB(DB):
         """)
         self.connect.commit()
 
-    def upsert_user(self, user_id: str, phone_number: str = "") -> bool:
+    def upsert_user(self, user_id: str, phone_number: str = "", user_name: str = "") -> bool:
         return self._execute(
-            f"INSERT OR REPLACE INTO {self.USERS_TABLE} (user_id, phone_number, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-            (str(user_id).strip(), str(phone_number)),
+            f"INSERT OR REPLACE INTO {self.USERS_TABLE} (user_id, phone_number, user_name, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+            (str(user_id).strip(), str(phone_number), str(user_name)),
         )
 
     def insert_daily_data(self, data: dict) -> bool:
         date = str(data["date"]).strip()
         return self._execute(
-            f"""INSERT INTO {self.DAILY_TABLE} (user_id, date, total_usage, valley_usage, flat_usage, peak_usage, tip_usage)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+            f"""INSERT INTO {self.DAILY_TABLE} (user_id, user_name, date, total_usage, valley_usage, flat_usage, peak_usage, tip_usage)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, date) DO UPDATE SET
+                    user_name = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE {self.DAILY_TABLE}.user_name END,
                     total_usage = excluded.total_usage,
                     valley_usage = CASE WHEN excluded.valley_usage > 0 THEN excluded.valley_usage ELSE {self.DAILY_TABLE}.valley_usage END,
                     flat_usage = CASE WHEN excluded.flat_usage > 0 THEN excluded.flat_usage ELSE {self.DAILY_TABLE}.flat_usage END,
                     peak_usage = CASE WHEN excluded.peak_usage > 0 THEN excluded.peak_usage ELSE {self.DAILY_TABLE}.peak_usage END,
                     tip_usage = CASE WHEN excluded.tip_usage > 0 THEN excluded.tip_usage ELSE {self.DAILY_TABLE}.tip_usage END,
                     updated_at = CURRENT_TIMESTAMP""",
-            (self.user_id, date,
+            (self.user_id, data.get("user_name", ""),
+             date,
              _sf(data.get("total_usage"), 0.0), _sf(data.get("valley_usage"), 0.0),
              _sf(data.get("flat_usage"), 0.0), _sf(data.get("peak_usage"), 0.0),
              _sf(data.get("tip_usage"), 0.0)),
@@ -193,9 +197,10 @@ class SqliteDB(DB):
     def insert_monthly_data(self, data: dict) -> bool:
         month = str(data["month"]).strip()
         return self._execute(
-            f"""INSERT INTO {self.MONTHLY_TABLE} (user_id, month, total_usage, total_charge, valley_usage, flat_usage, peak_usage, tip_usage)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            f"""INSERT INTO {self.MONTHLY_TABLE} (user_id, user_name, month, total_usage, total_charge, valley_usage, flat_usage, peak_usage, tip_usage)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, month) DO UPDATE SET
+                    user_name = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE {self.MONTHLY_TABLE}.user_name END,
                     total_usage = COALESCE(excluded.total_usage, {self.MONTHLY_TABLE}.total_usage),
                     total_charge = COALESCE(excluded.total_charge, {self.MONTHLY_TABLE}.total_charge),
                     valley_usage = CASE WHEN excluded.valley_usage > 0 THEN excluded.valley_usage ELSE {self.MONTHLY_TABLE}.valley_usage END,
@@ -203,7 +208,8 @@ class SqliteDB(DB):
                     peak_usage = CASE WHEN excluded.peak_usage > 0 THEN excluded.peak_usage ELSE {self.MONTHLY_TABLE}.peak_usage END,
                     tip_usage = CASE WHEN excluded.tip_usage > 0 THEN excluded.tip_usage ELSE {self.MONTHLY_TABLE}.tip_usage END,
                     updated_at = CURRENT_TIMESTAMP""",
-            (self.user_id, month,
+            (self.user_id, data.get("user_name", ""),
+             month,
              _sf(data.get("total_usage"), 0.0), _sf(data.get("total_charge")),
              _sf(data.get("valley_usage"), 0.0), _sf(data.get("flat_usage"), 0.0),
              _sf(data.get("peak_usage"), 0.0), _sf(data.get("tip_usage"), 0.0)),
@@ -212,9 +218,10 @@ class SqliteDB(DB):
     def insert_yearly_data(self, data: dict) -> bool:
         year = str(data["year"]).strip()
         return self._execute(
-            f"""INSERT INTO {self.YEARLY_TABLE} (user_id, year, total_usage, total_charge, valley_usage, flat_usage, peak_usage, tip_usage)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            f"""INSERT INTO {self.YEARLY_TABLE} (user_id, user_name, year, total_usage, total_charge, valley_usage, flat_usage, peak_usage, tip_usage)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, year) DO UPDATE SET
+                    user_name = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE {self.YEARLY_TABLE}.user_name END,
                     total_usage = COALESCE(excluded.total_usage, {self.YEARLY_TABLE}.total_usage),
                     total_charge = COALESCE(excluded.total_charge, {self.YEARLY_TABLE}.total_charge),
                     valley_usage = CASE WHEN excluded.valley_usage > 0 THEN excluded.valley_usage ELSE {self.YEARLY_TABLE}.valley_usage END,
@@ -222,7 +229,8 @@ class SqliteDB(DB):
                     peak_usage = CASE WHEN excluded.peak_usage > 0 THEN excluded.peak_usage ELSE {self.YEARLY_TABLE}.peak_usage END,
                     tip_usage = CASE WHEN excluded.tip_usage > 0 THEN excluded.tip_usage ELSE {self.YEARLY_TABLE}.tip_usage END,
                     updated_at = CURRENT_TIMESTAMP""",
-            (self.user_id, year,
+            (self.user_id, data.get("user_name", ""),
+             year,
              _sf(data.get("total_usage"), 0.0), _sf(data.get("total_charge")),
              _sf(data.get("valley_usage"), 0.0), _sf(data.get("flat_usage"), 0.0),
              _sf(data.get("peak_usage"), 0.0), _sf(data.get("tip_usage"), 0.0)),
@@ -231,12 +239,11 @@ class SqliteDB(DB):
     def insert_balance_log(self, data: dict) -> bool:
         as_of = str(data.get("as_of") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")).strip()
         return self._execute(
-            f"""INSERT OR REPLACE INTO {self.BALANCE_TABLE} (user_id, as_of, balance, prepay_balance, estimated_amount, history_owe, penalty, total_usage)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (self.user_id, as_of,
-             _sf(data.get("balance")), _sf(data.get("prepay_balance")),
-             _sf(data.get("estimated_amount")), _sf(data.get("history_owe")),
-             _sf(data.get("penalty")), _sf(data.get("total_usage"))),
+            f"""INSERT OR REPLACE INTO {self.BALANCE_TABLE} (user_id, user_name, as_of, balance, amount_due)
+                VALUES (?, ?, ?, ?, ?)""",
+            (self.user_id, data.get("user_name", ""),
+             as_of,
+             _sf(data.get("balance")), _sf(data.get("amount_due"))),
         )
 
     def sync_yearly_from_monthly(self, year: str) -> bool:
@@ -354,12 +361,14 @@ class MysqlDB(DB):
             cursor.execute(f"""CREATE TABLE IF NOT EXISTS `{self.USERS_TABLE}` (
                 `user_id` VARCHAR(50) PRIMARY KEY NOT NULL,
                 `phone_number` VARCHAR(50) NOT NULL DEFAULT '',
+                `user_name` VARCHAR(100) NOT NULL DEFAULT '',
                 `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
 
             cursor.execute(f"""CREATE TABLE IF NOT EXISTS `{self.DAILY_TABLE}` (
                 `user_id` VARCHAR(50) NOT NULL,
+                `user_name` VARCHAR(100) NOT NULL DEFAULT '',
                 `date` DATE NOT NULL,
                 `total_usage` DOUBLE NOT NULL DEFAULT 0,
                 `valley_usage` DOUBLE NOT NULL DEFAULT 0,
@@ -373,6 +382,7 @@ class MysqlDB(DB):
 
             cursor.execute(f"""CREATE TABLE IF NOT EXISTS `{self.MONTHLY_TABLE}` (
                 `user_id` VARCHAR(50) NOT NULL,
+                `user_name` VARCHAR(100) NOT NULL DEFAULT '',
                 `month` VARCHAR(7) NOT NULL,
                 `total_usage` DOUBLE NOT NULL DEFAULT 0,
                 `total_charge` DOUBLE,
@@ -387,6 +397,7 @@ class MysqlDB(DB):
 
             cursor.execute(f"""CREATE TABLE IF NOT EXISTS `{self.YEARLY_TABLE}` (
                 `user_id` VARCHAR(50) NOT NULL,
+                `user_name` VARCHAR(100) NOT NULL DEFAULT '',
                 `year` VARCHAR(4) NOT NULL,
                 `total_usage` DOUBLE NOT NULL DEFAULT 0,
                 `total_charge` DOUBLE,
@@ -401,16 +412,39 @@ class MysqlDB(DB):
 
             cursor.execute(f"""CREATE TABLE IF NOT EXISTS `{self.BALANCE_TABLE}` (
                 `user_id` VARCHAR(50) NOT NULL,
+                `user_name` VARCHAR(100) NOT NULL DEFAULT '',
                 `as_of` DATETIME NOT NULL,
                 `balance` DOUBLE,
-                `prepay_balance` DOUBLE,
-                `estimated_amount` DOUBLE,
-                `history_owe` DOUBLE,
-                `penalty` DOUBLE,
-                `total_usage` DOUBLE,
+                `amount_due` DOUBLE,
                 `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (`user_id`, `as_of`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+
+            # 为已存在的表添加 user_name 列（兼容升级）
+            for tbl in [self.USERS_TABLE, self.DAILY_TABLE, self.MONTHLY_TABLE,
+                        self.YEARLY_TABLE, self.BALANCE_TABLE]:
+                try:
+                    cursor.execute(
+                        f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                        f"WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='{tbl}' AND COLUMN_NAME='user_name'"
+                    )
+                    if cursor.fetchone()[0] == 0:
+                        cursor.execute(f"ALTER TABLE `{tbl}` ADD COLUMN `user_name` VARCHAR(100) NOT NULL DEFAULT '' AFTER `user_id`")
+                        logging.info(f"MySQL: 已为表 {tbl} 添加 user_name 列")
+                except Exception as exc:
+                    logging.debug(f"ALTER TABLE {tbl} add user_name: {exc}")
+
+            # 为 balance_log 表添加 amount_due 列（替代旧的多个金额字段）
+            try:
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                    f"WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='{self.BALANCE_TABLE}' AND COLUMN_NAME='amount_due'"
+                )
+                if cursor.fetchone()[0] == 0:
+                    cursor.execute(f"ALTER TABLE `{self.BALANCE_TABLE}` ADD COLUMN `amount_due` DOUBLE AFTER `balance`")
+                    logging.info(f"MySQL: 已为表 {self.BALANCE_TABLE} 添加 amount_due 列")
+            except Exception as exc:
+                logging.debug(f"ALTER TABLE balance_log add amount_due: {exc}")
 
             self.connect.commit()
         except Exception as exc:
@@ -418,24 +452,26 @@ class MysqlDB(DB):
         finally:
             cursor.close()
 
-    def upsert_user(self, user_id: str, phone_number: str = "") -> bool:
+    def upsert_user(self, user_id: str, phone_number: str = "", user_name: str = "") -> bool:
         return self._execute(
-            f"REPLACE INTO `{self.USERS_TABLE}` (user_id, phone_number) VALUES (%s, %s)",
-            (str(user_id).strip(), str(phone_number)),
+            f"REPLACE INTO `{self.USERS_TABLE}` (user_id, phone_number, user_name) VALUES (%s, %s, %s)",
+            (str(user_id).strip(), str(phone_number), str(user_name)),
         )
 
     def insert_daily_data(self, data: dict) -> bool:
         date = str(data["date"]).strip()
         return self._execute(
-            f"""INSERT INTO `{self.DAILY_TABLE}` (user_id, date, total_usage, valley_usage, flat_usage, peak_usage, tip_usage)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            f"""INSERT INTO `{self.DAILY_TABLE}` (user_id, user_name, date, total_usage, valley_usage, flat_usage, peak_usage, tip_usage)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
+                    user_name=CASE WHEN VALUES(user_name)!='' THEN VALUES(user_name) ELSE user_name END,
                     total_usage=VALUES(total_usage),
                     valley_usage=CASE WHEN VALUES(valley_usage)>0 THEN VALUES(valley_usage) ELSE valley_usage END,
                     flat_usage=CASE WHEN VALUES(flat_usage)>0 THEN VALUES(flat_usage) ELSE flat_usage END,
                     peak_usage=CASE WHEN VALUES(peak_usage)>0 THEN VALUES(peak_usage) ELSE peak_usage END,
                     tip_usage=CASE WHEN VALUES(tip_usage)>0 THEN VALUES(tip_usage) ELSE tip_usage END""",
-            (self.user_id, date,
+            (self.user_id, data.get("user_name", ""),
+             date,
              _sf(data.get("total_usage"), 0.0), _sf(data.get("valley_usage"), 0.0),
              _sf(data.get("flat_usage"), 0.0), _sf(data.get("peak_usage"), 0.0),
              _sf(data.get("tip_usage"), 0.0)),
@@ -444,16 +480,18 @@ class MysqlDB(DB):
     def insert_monthly_data(self, data: dict) -> bool:
         month = str(data["month"]).strip()
         return self._execute(
-            f"""INSERT INTO `{self.MONTHLY_TABLE}` (user_id, month, total_usage, total_charge, valley_usage, flat_usage, peak_usage, tip_usage)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            f"""INSERT INTO `{self.MONTHLY_TABLE}` (user_id, user_name, month, total_usage, total_charge, valley_usage, flat_usage, peak_usage, tip_usage)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
+                    user_name=CASE WHEN VALUES(user_name)!='' THEN VALUES(user_name) ELSE user_name END,
                     total_usage=COALESCE(VALUES(total_usage), total_usage),
                     total_charge=COALESCE(VALUES(total_charge), total_charge),
                     valley_usage=CASE WHEN VALUES(valley_usage)>0 THEN VALUES(valley_usage) ELSE valley_usage END,
                     flat_usage=CASE WHEN VALUES(flat_usage)>0 THEN VALUES(flat_usage) ELSE flat_usage END,
                     peak_usage=CASE WHEN VALUES(peak_usage)>0 THEN VALUES(peak_usage) ELSE peak_usage END,
                     tip_usage=CASE WHEN VALUES(tip_usage)>0 THEN VALUES(tip_usage) ELSE tip_usage END""",
-            (self.user_id, month,
+            (self.user_id, data.get("user_name", ""),
+             month,
              _sf(data.get("total_usage"), 0.0), _sf(data.get("total_charge")),
              _sf(data.get("valley_usage"), 0.0), _sf(data.get("flat_usage"), 0.0),
              _sf(data.get("peak_usage"), 0.0), _sf(data.get("tip_usage"), 0.0)),
@@ -462,16 +500,18 @@ class MysqlDB(DB):
     def insert_yearly_data(self, data: dict) -> bool:
         year = str(data["year"]).strip()
         return self._execute(
-            f"""INSERT INTO `{self.YEARLY_TABLE}` (user_id, year, total_usage, total_charge, valley_usage, flat_usage, peak_usage, tip_usage)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            f"""INSERT INTO `{self.YEARLY_TABLE}` (user_id, user_name, year, total_usage, total_charge, valley_usage, flat_usage, peak_usage, tip_usage)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
+                    user_name=CASE WHEN VALUES(user_name)!='' THEN VALUES(user_name) ELSE user_name END,
                     total_usage=COALESCE(VALUES(total_usage), total_usage),
                     total_charge=COALESCE(VALUES(total_charge), total_charge),
                     valley_usage=CASE WHEN VALUES(valley_usage)>0 THEN VALUES(valley_usage) ELSE valley_usage END,
                     flat_usage=CASE WHEN VALUES(flat_usage)>0 THEN VALUES(flat_usage) ELSE flat_usage END,
                     peak_usage=CASE WHEN VALUES(peak_usage)>0 THEN VALUES(peak_usage) ELSE peak_usage END,
                     tip_usage=CASE WHEN VALUES(tip_usage)>0 THEN VALUES(tip_usage) ELSE tip_usage END""",
-            (self.user_id, year,
+            (self.user_id, data.get("user_name", ""),
+             year,
              _sf(data.get("total_usage"), 0.0), _sf(data.get("total_charge")),
              _sf(data.get("valley_usage"), 0.0), _sf(data.get("flat_usage"), 0.0),
              _sf(data.get("peak_usage"), 0.0), _sf(data.get("tip_usage"), 0.0)),
@@ -480,12 +520,11 @@ class MysqlDB(DB):
     def insert_balance_log(self, data: dict) -> bool:
         as_of = str(data.get("as_of") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")).strip()
         return self._execute(
-            f"""REPLACE INTO `{self.BALANCE_TABLE}` (user_id, as_of, balance, prepay_balance, estimated_amount, history_owe, penalty, total_usage)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (self.user_id, as_of,
-             _sf(data.get("balance")), _sf(data.get("prepay_balance")),
-             _sf(data.get("estimated_amount")), _sf(data.get("history_owe")),
-             _sf(data.get("penalty")), _sf(data.get("total_usage"))),
+            f"""REPLACE INTO `{self.BALANCE_TABLE}` (user_id, user_name, as_of, balance, amount_due)
+                VALUES (%s, %s, %s, %s, %s)""",
+            (self.user_id, data.get("user_name", ""),
+             as_of,
+             _sf(data.get("balance")), _sf(data.get("amount_due"))),
         )
 
     def sync_yearly_from_monthly(self, year: str) -> bool:

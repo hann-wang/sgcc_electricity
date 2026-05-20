@@ -51,9 +51,9 @@ class SensorUpdator:
         if tou_data:
             self._update_tou_sensors(postfix, tou_data)
 
-        # 预付费余额传感器
-        if enhanced_balance and enhanced_balance.get("prepay_balance") is not None:
-            self.update_prepay_balance(postfix, enhanced_balance["prepay_balance"])
+        # 应交金额传感器
+        if enhanced_balance and enhanced_balance.get("amount_due") is not None:
+            self.update_prepay_balance(postfix, enhanced_balance["amount_due"])
 
         logging.info(f"[{user_id}] Home Assistant 传感器数据更新完成!")
 
@@ -205,14 +205,8 @@ class SensorUpdator:
             "state_class": "total",
         }
         if enhanced_balance:
-            if enhanced_balance.get("prepay_balance") is not None:
-                attributes["prepay_balance"] = enhanced_balance["prepay_balance"]
-            if enhanced_balance.get("estimated_amount") is not None:
-                attributes["estimated_amount"] = enhanced_balance["estimated_amount"]
-            if enhanced_balance.get("history_owe") is not None:
-                attributes["history_owe"] = enhanced_balance["history_owe"]
-            if enhanced_balance.get("penalty") is not None:
-                attributes["penalty"] = enhanced_balance["penalty"]
+            if enhanced_balance.get("amount_due") is not None:
+                attributes["amount_due"] = enhanced_balance["amount_due"]
 
         request_body = {
             "state": sensorState,

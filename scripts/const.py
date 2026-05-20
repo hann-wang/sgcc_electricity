@@ -4,7 +4,7 @@ import os
 LOGIN_URL = "https://95598.cn/osgweb/login"
 ELECTRIC_USAGE_URL = "https://95598.cn/osgweb/electricityCharge"
 BALANCE_URL = "https://95598.cn/osgweb/userAcc"
-BILL_SUMMARY_URL = "https://95598.cn/osgweb01/electricityChargeQuery/getBmListInfo"
+BILL_SUMMARY_URL = "https://95598.cn/osgweb/electricityCharge"
 ELECTRIC_BILL_SUMMARY_URL = (
     "https://95598.cn/osgweb01/electricityChargeQuery/queryElectricBillSummary"
 )

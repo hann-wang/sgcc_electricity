@@ -101,10 +101,13 @@ def run_task(data_fetcher: DataFetcher):
 def logger_init(level: str):
     logger = logging.getLogger()
     logger.setLevel(level)
+    # 移除所有默认 handler，避免重复输出（解决 INFO:root: 乱码问题）
+    for h in logger.handlers[:]:
+        logger.removeHandler(h)
     logging.getLogger("urllib3").setLevel(logging.CRITICAL)
-    format = logging.Formatter("%(asctime)s  [%(levelname)-8s] ---- %(message)s", "%Y-%m-%d %H:%M:%S")
+    fmt = logging.Formatter("%(asctime)s  [%(levelname)-8s] ---- %(message)s", "%Y-%m-%d %H:%M:%S")
     sh = logging.StreamHandler(stream=sys.stdout)
-    sh.setFormatter(format)
+    sh.setFormatter(fmt)
     logger.addHandler(sh)
 
 

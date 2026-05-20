@@ -68,19 +68,25 @@ def selected_vue_data(driver) -> list[dict[str, Any]]:
     return driver.execute_script(SELECTED_VUE_DATA_SCRIPT) or []
 
 
+def normalize_user_info(components: list[dict[str, Any]]) -> dict[str, Any]:
+    """Extract user info (name, address) from Vue state."""
+    cons = _first_data_value(components, "consInfoobj") or _first_data_value(components, "consInfo") or {}
+    if not isinstance(cons, dict):
+        cons = {}
+    return {
+        "user_name": cons.get("consName") or cons.get("custName") or "",
+        "address": cons.get("elecAddr") or cons.get("addr") or "",
+        "user_id": cons.get("consNo") or cons.get("consId") or "",
+    }
+
+
 def normalize_balance(components: list[dict[str, Any]]) -> dict[str, Any]:
-    """Extract enhanced balance info from Vue state."""
+    """Extract amount due (应交金额) from Vue state."""
     raw = _first_data_value(components, "mixinGetYuEdata") or {}
     return {
         "as_of": raw.get("amtTime"),
-        "balance": _safe_float(raw.get("sumMoney")),
-        "prepay_balance": _safe_float(raw.get("prepayBal")),
-        "estimated_amount": _safe_float(raw.get("estiAmt")),
-        "history_owe": _safe_float(raw.get("historyOwe")),
-        "penalty": _safe_float(raw.get("penalty")),
-        "total_usage": _safe_float(raw.get("totalPq")),
+        "amount_due": _safe_float(raw.get("historyOwe")),
         "user_id": raw.get("consNo"),
-        "raw": raw,
     }
 
 
@@ -153,10 +159,12 @@ def _data_values(components: list[dict[str, Any]], key: str) -> list[Any]:
 
 
 def _normalize_usage_month(row: dict[str, Any]) -> dict[str, Any]:
+    total = _safe_float(row.get("monthEleNum"))
+    charge = _safe_float(row.get("monthEleCost"))
     return {
         "month": _normalize_ym(row.get("month")),
-        "usage": _safe_float(row.get("monthEleNum")),
-        "charge": _safe_float(row.get("monthEleCost")),
+        "total_usage": total,
+        "total_charge": charge,
         "begin_date": row.get("begDate"),
         "end_date": row.get("endDate"),
         "meter_read_time": row.get("mrDate"),
@@ -168,9 +176,10 @@ def _normalize_daily_row(row: dict[str, Any]) -> Optional[dict[str, Any]]:
     date = str(row.get("day") or "").strip()
     if not date:
         return None
+    total = _safe_float(row.get("dayElePq"), default=0.0)
     return {
         "date": date,
-        "usage": _safe_float(row.get("dayElePq"), default=0.0),
+        "total_usage": total,
         "valley_usage": _safe_float(row.get("thisVPq"), default=0.0),
         "flat_usage": _safe_float(row.get("thisNPq"), default=0.0),
         "peak_usage": _safe_float(row.get("thisPPq"), default=0.0),
