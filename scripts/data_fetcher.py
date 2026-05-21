@@ -62,7 +62,7 @@ class DataFetcher:
         self._init_db()
     
     def _init_db(self):
-        self.db_type = os.getenv("DB_TYPE", "None").lower()
+        self.db_type = os.getenv("DB_TYPE", "sqlite").lower()
         if self.db_type == 'mysql':
             from db import MysqlDB
             self.db = MysqlDB()
@@ -995,7 +995,7 @@ class DataFetcher:
             logging.warning(f"[{user_id}] 用电量页面用户切换失败, 当前户号={self._get_current_userid(driver) or '未知'}")
         time.sleep(self._step_wait)
 
-        fetch_days = int(os.getenv("DAILY_FETCH_DAYS", 7))
+        fetch_days = int(os.getenv("DAILY_FETCH_DAYS", 30))
         if fetch_days not in (7, 30):
             fetch_days = 7
 
@@ -1516,7 +1516,7 @@ class DataFetcher:
     # 增加获取每日用电量的函数
     def _get_daily_usage_data(self, driver, user_id=""):
         """获取每日用电量完整记录（含峰谷分时），返回 dict 列表"""
-        fetch_days = int(os.getenv("DAILY_FETCH_DAYS", 7))
+        fetch_days = int(os.getenv("DAILY_FETCH_DAYS", 30))
         if fetch_days not in (7, 30):
             fetch_days = 7
 
@@ -1754,7 +1754,7 @@ class DataFetcher:
         """从 Vue state 提取每日用电量数据 (作为 DOM 方式的 fallback)"""
         try:
             components = vue_state.selected_vue_data(driver)
-            fetch_days = int(os.getenv("DAILY_FETCH_DAYS", 7))
+            fetch_days = int(os.getenv("DAILY_FETCH_DAYS", 30))
             usage_info = vue_state.normalize_usage(components, fetch_days=fetch_days)
             daily_list = usage_info.get("daily", [])
             if daily_list:

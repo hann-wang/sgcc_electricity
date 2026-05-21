@@ -42,7 +42,7 @@ def main():
         logging.info(f"read env PHONE_NUMBER : {PHONE_NUMBER}")
         PASSWORD = os.getenv("PASSWORD")
         HASS_URL = os.getenv("HASS_URL")
-        JOB_START_TIME = os.getenv("JOB_START_TIME","07:00" )
+        JOB_START_TIME = os.getenv("JOB_START_TIME", "09:30")
         RUN_ON_STARTUP = os.getenv("RUN_ON_STARTUP", "false").lower() in ("true", "1", "yes")
         logging.info(f"RUN_ON_STARTUP={os.getenv('RUN_ON_STARTUP', 'false')} (生效: {RUN_ON_STARTUP})")
         LOG_LEVEL = os.getenv("LOG_LEVEL","INFO")
