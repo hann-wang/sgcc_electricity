@@ -44,5 +44,5 @@ def load_project_env() -> None:
         return
     import dotenv
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
-    dotenv.load_dotenv(env_path, verbose=True)
+    dotenv.load_dotenv(env_path, verbose=True, override=True)
 

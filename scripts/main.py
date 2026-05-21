@@ -1,7 +1,17 @@
+import sys
+import os
+
+# Windows 终端 UTF-8（必须在任何中文日志输出之前执行）
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONUTF8", "1")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 import logging
 import logging.config
-import os
-import sys
 import time
 import schedule
 import json
@@ -11,11 +21,6 @@ from sensor_updator import SensorUpdator
 from datetime import datetime,timedelta
 from const import *
 from data_fetcher import DataFetcher
-
-# Windows 终端 UTF-8 编码支持
-if sys.platform == 'win32':
-    sys.stdout.reconfigure(encoding='utf-8')
-    sys.stderr.reconfigure(encoding='utf-8')
 
 def main():
     global RETRY_TIMES_LIMIT
