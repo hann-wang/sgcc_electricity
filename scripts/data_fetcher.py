@@ -647,17 +647,20 @@ class DataFetcher:
                     logging.info(f"用户 {user_id} 在忽略列表中, 跳过")
                     continue
 
-                driver.get(ELECTRIC_USAGE_URL)
+                driver.get(BALANCE_URL)
                 time.sleep(self._step_wait)
-                logging.info(f"正在切换到用户 [{user_id}]...")
+                logging.info(f"正在 userAcc 页面切换到用户 [{user_id}]...")
                 if not self._switch_to_user(driver, user_id, userid_index):
-                    logging.warning(f"用户 [{user_id}] 切换失败, 跳过")
+                    logging.warning(f"用户 [{user_id}] 在余额页切换失败, 跳过")
                     continue
 
                 current_userid = self._get_current_userid(driver)
-                logging.info(f"当前用户: {current_userid}, 开始获取用电数据...")
-                driver.get(BALANCE_URL)
-                time.sleep(self._step_wait)
+                if current_userid and current_userid != user_id:
+                    logging.warning(
+                        f"余额页户号仍为 {current_userid}, 期望 {user_id}, 跳过该用户"
+                    )
+                    continue
+                logging.info(f"当前用户: {current_userid or user_id}, 开始获取用电数据...")
                 balance, last_daily_date, last_daily_usage, yearly_charge, yearly_usage, month_charge, month_usage, tou_data, enhanced_balance, step_data, last_month_period = self._get_all_data(driver, user_id, userid_index)
                 logging.info(f"用户 [{user_id}] 数据获取完成: 余额={balance}CNY, 最近日用电={last_daily_usage}kWh({last_daily_date}), "
                              f"年度用电={yearly_usage}kWh, 年度电费={yearly_charge}CNY, 月用电={month_usage}kWh, 月电费={month_charge}CNY")
@@ -964,30 +967,63 @@ class DataFetcher:
         ]
         
 
+    def _fetch_balance(self, driver, user_id: str, userid_index: int) -> tuple[Optional[float], Optional[dict]]:
+        """在 userAcc 页面获取指定户号余额，优先 Vue state 并校验户号。"""
+        current = self._get_current_userid(driver)
+        if current != user_id:
+            logging.warning(
+                f"[{user_id}] 余额页当前户号={current or '未知'}, 正在重新切换..."
+            )
+            if not self._switch_to_user(driver, user_id, userid_index):
+                logging.error(f"[{user_id}] 余额页切换用户失败")
+                return None, None
+            current = self._get_current_userid(driver)
+            if current and current != user_id:
+                logging.error(f"[{user_id}] 余额页户号仍为 {current}, 无法读取余额")
+                return None, None
+
+        enhanced_balance = None
+        try:
+            components = vue_state.selected_vue_data(driver)
+            enhanced_balance = vue_state.normalize_balance(components)
+            elec_bal = vue_state.normalize_electric_balance(components, expected_user_id=user_id)
+            if elec_bal.get("user_mismatch"):
+                logging.warning(
+                    f"[{user_id}] Vue 余额数据户号={elec_bal.get('user_id')} 与目标不一致, 忽略 Vue 余额"
+                )
+            elif elec_bal.get("balance") is not None:
+                balance = float(elec_bal["balance"])
+                logging.info(f"[{user_id}] 从 Vue state 获取余额: {balance} 元")
+                if enhanced_balance and not enhanced_balance.get("user_id"):
+                    enhanced_balance["user_id"] = elec_bal.get("user_id")
+                return balance, enhanced_balance
+        except Exception as e:
+            logging.warning(f"[{user_id}] Vue state 余额获取失败: {e}")
+
+        balance = self._get_electric_balance(driver)
+        if balance is not None:
+            logging.info(f"[{user_id}] 从 DOM 获取余额: {balance} 元")
+        return balance, enhanced_balance
+
     def _get_all_data(self, driver, user_id, userid_index):
         logging.info(f"[{user_id}] 正在获取电费余额...")
-        balance = self._get_electric_balance(driver)
+        balance, enhanced_balance = self._fetch_balance(driver, user_id, userid_index)
         if balance is None:
             logging.error(f"[{user_id}] 获取电费余额失败")
         else:
             logging.info(f"[{user_id}] 电费余额: {balance} 元")
 
-        # 尝试通过 Vue state 获取增强余额和用户名
-        enhanced_balance = None
         user_name = self._user_name_map.get(user_id, "")
-        if self.db is not None:
+        if self.db is not None and not user_name:
             try:
                 components = vue_state.selected_vue_data(driver)
-                enhanced_balance = vue_state.normalize_balance(components)
-                # 如果用户名为空，从 Vue state 补充
-                if not user_name:
-                    user_info = vue_state.normalize_user_info(components)
-                    user_name = user_info.get("user_name", "")
-                    if user_name:
-                        self._user_name_map[user_id] = user_name
-                        logging.info(f"[{user_id}] 从 Vue state 获取用户名: {user_name}")
+                user_info = vue_state.normalize_user_info(components)
+                user_name = user_info.get("user_name", "")
+                if user_name:
+                    self._user_name_map[user_id] = user_name
+                    logging.info(f"[{user_id}] 从 Vue state 获取用户名: {user_name}")
             except Exception as e:
-                logging.warning(f"[{user_id}] 增强余额获取失败: {e}")
+                logging.warning(f"[{user_id}] 用户名获取失败: {e}")
         if user_name:
             logging.info(f"[{user_id}] 用户名: {user_name}")
 
@@ -1036,14 +1072,14 @@ class DataFetcher:
             except Exception as e:
                 logging.warning(f"[{user_id}] 分时电量数据获取失败: {e}")
 
-        # 从电费电量查询页面尝试获取余额 (作为补充)
-        if self.db is not None and (balance is None or enhanced_balance is None):
+        # 从用电量页面尝试补充余额（仅当 userAcc 未取到且户号已切换）
+        if self.db is not None and balance is None:
             try:
                 components = vue_state.selected_vue_data(driver)
-                elec_bal = vue_state.normalize_electric_balance(components)
-                if elec_bal.get("balance") is not None and balance is None:
+                elec_bal = vue_state.normalize_electric_balance(components, expected_user_id=user_id)
+                if not elec_bal.get("user_mismatch") and elec_bal.get("balance") is not None:
                     balance = elec_bal["balance"]
-                    logging.info(f"[{user_id}] 从用电量页面获取余额: {balance} 元")
+                    logging.info(f"[{user_id}] 从用电量页面 Vue state 补充余额: {balance} 元")
             except Exception as e:
                 logging.debug(f"[{user_id}] 用电量页面余额获取失败: {e}")
 

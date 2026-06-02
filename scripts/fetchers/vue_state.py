@@ -155,26 +155,40 @@ def normalize_bill_detail(components: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def normalize_electric_balance(components: list[dict[str, Any]]) -> dict[str, Any]:
-    """从电费电量查询页面提取余额信息 (兼容预缴费和后缴费账户)."""
+def normalize_electric_balance(components: list[dict[str, Any]], expected_user_id: str = "") -> dict[str, Any]:
+    """从 userAcc / 电费电量页 Vue state 提取余额（预付费 oweAmt 等）。"""
     result = {
         "balance": None,
         "amount_due": None,
         "as_of": None,
         "user_id": None,
     }
-    # 从 mixinGetYuEdata 获取余额
     raw = _first_data_value(components, "mixinGetYuEdata")
     if isinstance(raw, dict):
         result["amount_due"] = _safe_float(raw.get("historyOwe"))
         result["as_of"] = raw.get("amtTime")
-        result["user_id"] = raw.get("consNo")
-    # 从 elecItemData 获取余额
+        result["user_id"] = str(raw.get("consNo") or raw.get("consId") or "").strip()
+        for key in ("oweAmt", "prepayBal", "balance", "usableAmt", "acctBalance", "surplusAmt"):
+            val = _safe_float(raw.get(key))
+            if val is not None:
+                result["balance"] = val
+                break
+
     elec = _first_data_value(components, "elecItemData")
     if isinstance(elec, dict):
+        if not result["user_id"]:
+            result["user_id"] = str(elec.get("consNo") or elec.get("consId") or "").strip()
         balance_val = _safe_float(elec.get("oweAmt"))
         if balance_val is not None:
             result["balance"] = balance_val
+
+    if not result["user_id"]:
+        user_info = normalize_user_info(components)
+        result["user_id"] = str(user_info.get("user_id") or "").strip()
+
+    expected = str(expected_user_id or "").strip()
+    if expected and result["user_id"] and result["user_id"] != expected:
+        result["user_mismatch"] = True
     return result
 
 
