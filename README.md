@@ -281,7 +281,7 @@ Docker Compose 方式通过 `.env` 文件配置，完整配置项见 `example.en
 | `WEWORK_WEBHOOK_URL` | — | 企业微信群机器人 Webhook（`PUSH_TYPE=wework` 时必填） |
 | `WEWORK_PUSH_SUMMARY` | true | 抓取成功后推送多户汇总 |
 | `WEB_DASHBOARD` | true | 启用 Web 控制台（[说明](docs/WEB_DASHBOARD.md)） |
-| `WEB_DASHBOARD_PORT` | 8080 | 控制台端口（Docker host 网络） |
+| `WEB_DASHBOARD_PORT` | 8080 | 控制台端口（`docker-compose` 映射宿主机端口） |
 | `WEB_DASHBOARD_PASSWORD` | password | 控制台登录密码 |
 | `FETCH_COOLDOWN_MINUTES` | 30 | 手动同步冷却时间 |
 | `BALANCE` | 5.0 | 余额低于此值时通知（需开启 PUSH_TYPE） |
