@@ -26,6 +26,38 @@
 - 忽略户号仅跳过抓取，保留数据库历史数据
 - 密码登录失败自动切换二维码登录兜底
 - 电费余额不足通知（PushPlus / URL / 企业微信）
+- 同步完成后企业微信推送多户汇总（余额、日/月/年用电、当月分时、应交金额）
+
+### 企业微信同步汇总（效果预览）
+
+配置 `PUSH_TYPE=wework` 与 `WEWORK_WEBHOOK_URL` 后，每次抓取成功会向群机器人推送 Markdown 汇总。以下为**脱敏示例**（户名、户号为虚构数据）：
+
+```
+国家电网数据同步完成
+同步时间：2026-06-02 15:21:06
+成功户号：2 个
+
+示例（电动车）
+户号：3200000000001
+余额：150.0 元
+最近用电：0.0 kWh (2026-06-01)
+上月（5月1日-5月31日）：311 kWh / 119 元
+当月累计（2026-06）：0.0 kWh
+年度：2215 kWh / 862 元
+应交金额：0.0 元
+
+示例（住宅）
+户号：3200000000002
+余额：250.0 元
+最近用电：7.88 kWh (2026-06-01)
+上月（5月1日-5月31日）：256 kWh / 120 元
+当月累计（2026-06）：7.88 kWh
+当月分时：谷 3.36 / 峰 4.52 kWh
+年度：1542 kWh / 718 元
+应交金额：0.0 元
+```
+
+多户家庭一次同步即可掌握各户余额与用电概况；余额低于阈值时还会单独推送提醒。详见 `WEWORK_PUSH_SUMMARY`、`BALANCE` 环境变量。
 
 ### 传感器列表
 
@@ -61,65 +93,22 @@
 | 模式 | 配置值 | 说明 |
 |------|--------|------|
 | 本地 OCR（**默认**） | `local` | 免费，基于 ddddocr + 图像匹配，适合点选验证码 |
-| 大模型视觉识别 | `llm` | 火山引擎豆包模型，支持点选 + 滑块，识别率更高 |
+| 大模型视觉识别 | `llm` | 火山引擎豆包，支持点选 + 滑块（[接入指南](docs/LLM_CAPTCHA.md)） |
 
 本地 OCR 无法满足时可切换大模型模式，或直接使用 `LOGIN_METHOD=qrcode` 扫码登录绕过验证码。
 
----
+### 大模型模式（CAPTCHA_SOLVER=llm）
 
-## 豆包大模型接入（CAPTCHA_SOLVER=llm）
+使用火山引擎豆包通过 OpenAI 兼容接口自动解算验证码，识别率高于本地 OCR，支持点选 + 滑块。
 
-参考 [ARC-MX/sgcc_electricity_new](https://github.com/ARC-MX/sgcc_electricity_new)，使用**火山引擎豆包大模型**通过 OpenAI 兼容接口自动解算腾讯验证码。
+```env
+CAPTCHA_SOLVER=llm
+LLM_API_KEY=your-api-key-here
+LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+LLM_MODEL=doubao-seed-2-0-pro-260215
+```
 
-### 使用的模型
-
-通过 OpenAI 兼容接口调用 **`doubao-seed-2-0-pro-260215`**，具备多模态视觉能力，可识别验证码中的图标位置与滑块缺口。
-
-### 注册与接入步骤
-
-1. **注册火山引擎账号**  
-   访问 [火山引擎官网](https://www.volcengine.com/)，使用手机号注册并完成**实名认证**（个人或企业均可）。  
-   实名认证入口：<https://console.volcengine.com/user/authentication/detail/>
-
-2. **开通豆包大模型**  
-   登录 [火山方舟控制台](https://console.volcengine.com/ark/)，进入 **在线推理** 页面，点击 **创建推理接入点**：
-   - 选择模型：**Doubao-Seed-2.0-pro-260215**（或其他支持视觉的多模态模型）
-   - 记录生成的**接入点 ID**（格式如 `ep-2025xxxxxx-xxxxx`，供控制台查阅，程序默认按模型名调用）
-
-3. **获取 API Key**  
-   在方舟控制台左侧 **API Key 管理** → **创建 API Key** → 复制 Key（格式如 `ark-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）。  
-   管理入口：<https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey>
-
-4. **写入配置**  
-   Docker / 本地运行：编辑 `.env`；HA Add-on：在加载项配置页填写。
-
-   ```env
-   CAPTCHA_SOLVER=llm
-   ARK_API_KEY=ark-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-   ```
-
-   可选高级参数：
-
-   | 变量 | 默认值 | 说明 |
-   |------|--------|------|
-   | `ARK_MODEL` | `doubao-seed-2-0-pro-260215` | 调用的模型名称 |
-   | `ARK_BASE_URL` | `https://ark.cn-beijing.volces.com/api/v3` | API 地址 |
-
-5. **重启服务**  
-   Docker：`docker compose up -d --force-recreate`  
-   Add-on：保存配置后重启加载项
-
-   启动日志应显示：`验证码识别模式: LLM 大模型`
-
-### 费用说明
-
-豆包系列模型按 token 计费，每次验证码解算消耗约数百 token。新用户注册通常有免费额度，个人家庭使用基本免费。详见 [火山引擎官方定价](https://www.volcengine.com/docs/82379/1099320)。
-
-### 注意事项
-
-- **API Key 勿泄露**，不要提交到 Git 或公开渠道
-- 国网每天有**登录次数限制**，验证码识别成功也可能因超限无法登录（RK001），请勿频繁重启测试
-- 大模型仅用于验证码识别，不影响用电量、电费等其他数据抓取逻辑
+注册账号、获取 API Key、费用与日志说明见 **[docs/LLM_CAPTCHA.md](docs/LLM_CAPTCHA.md)**。
 
 ---
 
@@ -269,13 +258,17 @@ Docker Compose 方式通过 `.env` 文件配置，完整配置项见 `example.en
 | `LOGIN_FALLBACK` | qrcode | 登录失败备选（qrcode / none） |
 | `JOB_START_TIME` | `09:30` | 每天同步开始时间 |
 | `RUN_ON_STARTUP` | `false` | Docker 启动后立即登录抓取 |
-| `CAPTCHA_SOLVER` | `local` | 验证码识别：`local` 本地 OCR / `llm` 豆包大模型（[接入步骤](#豆包大模型接入-captcha_solverllm)） |
-| `ARK_API_KEY` | — | 火山引擎 API Key（`CAPTCHA_SOLVER=llm` 时必填） |
+| `CAPTCHA_SOLVER` | `local` | 验证码识别：`local` 本地 OCR / `llm` 豆包大模型（[接入指南](docs/LLM_CAPTCHA.md)） |
+| `LLM_API_KEY` | — | 火山方舟 API Key（`CAPTCHA_SOLVER=llm` 时必填） |
+| `LLM_BASE_URL` | `https://ark.cn-beijing.volces.com/api/v3` | 豆包 OpenAI 兼容 API 地址 |
+| `LLM_MODEL` | `doubao-seed-2-0-pro-260215` | 调用的视觉模型 |
 | `DB_TYPE` | sqlite | 数据库类型（**默认 sqlite**；none 不存储且跳过当月分时传感器） |
 | `DAILY_FETCH_DAYS` | 30 | 每次获取日用电量天数（7 或 30） |
 | `DATA_RETENTION_DAYS` | 365 | 数据库记录保留天数 |
 | `IGNORE_USER_ID` | 空 | 忽略的户号（逗号分隔） |
 | `PUSH_TYPE` | none | 通知方式（none / pushplus / urlpush / wework） |
+| `WEWORK_WEBHOOK_URL` | — | 企业微信群机器人 Webhook（`PUSH_TYPE=wework` 时必填） |
+| `WEWORK_PUSH_SUMMARY` | true | 抓取成功后推送多户汇总 |
 | `BALANCE` | 5.0 | 余额低于此值时通知（需开启 PUSH_TYPE） |
 
 ---

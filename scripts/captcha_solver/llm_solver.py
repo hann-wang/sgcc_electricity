@@ -1,10 +1,13 @@
-"""点击验证码 LLM 解算器（火山引擎豆包大模型）。"""
+"""点击验证码 LLM 解算器（火山引擎豆包，OpenAI 兼容接口）。"""
 
 import base64
 import io
+import json
 import logging
 import os
 import re
+import threading
+import time
 from typing import List, Optional, Tuple
 from urllib.parse import unquote
 
@@ -13,6 +16,34 @@ from PIL import Image
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_LLM_MODEL = "doubao-seed-2-0-pro-260215"
+DEFAULT_LLM_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+
+
+def llm_api_key() -> str:
+    return os.getenv("LLM_API_KEY", "").strip()
+
+
+def llm_model() -> str:
+    return os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL).strip() or DEFAULT_LLM_MODEL
+
+
+def llm_base_url() -> str:
+    return os.getenv("LLM_BASE_URL", DEFAULT_LLM_BASE_URL).strip() or DEFAULT_LLM_BASE_URL
+
+
+def _mask_api_key(key: str) -> str:
+    if len(key) <= 8:
+        return "***"
+    return f"{key[:4]}...{key[-4:]}"
+
+
+def _wait_heartbeat(stop: threading.Event, label: str) -> None:
+    start = time.monotonic()
+    while not stop.wait(5):
+        elapsed = int(time.monotonic() - start)
+        logger.info("%s推理中，已等待 %ss...", label, elapsed)
 
 
 class ClickCaptchaSolver:
@@ -24,37 +55,57 @@ class ClickCaptchaSolver:
         model: Optional[str] = None,
         base_url: Optional[str] = None,
     ):
-        self.api_key = (api_key or os.getenv("ARK_API_KEY", "")).strip()
-        self.model = model or os.getenv("ARK_MODEL", "doubao-seed-2-0-pro-260215")
-        self.base_url = base_url or os.getenv(
-            "ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"
-        )
+        self.api_key = (api_key or llm_api_key()).strip()
+        self.model = model or llm_model()
+        self.base_url = base_url or llm_base_url()
         self._client: Optional[OpenAI] = None
 
     @property
     def client(self) -> OpenAI:
         if self._client is None:
             if not self.api_key:
-                raise RuntimeError("ARK_API_KEY 未设置，无法使用 LLM 验证码识别")
+                raise RuntimeError("LLM_API_KEY 未设置，无法使用 LLM 验证码识别")
             self._client = OpenAI(base_url=self.base_url, api_key=self.api_key)
         return self._client
 
     def solve(
         self, ref_url: str, main_url: str, main_width: int, main_height: int
     ) -> List[Tuple[int, int]]:
+        t0 = time.monotonic()
+        logger.info(
+            "开始大模型点选解算: model=%s, endpoint=%s, 主图=%sx%s",
+            self.model,
+            self.base_url,
+            main_width,
+            main_height,
+        )
+
+        logger.info("步骤 1/4: 下载参考图标条...")
         ref_raw = self._download(ref_url)
         if not ref_raw:
             return []
+        logger.info("参考图标条已下载 (%s bytes, %.1fs)", len(ref_raw), time.monotonic() - t0)
+
+        logger.info("步骤 2/4: 拆分参考图标...")
         icon_uris = self._split_strip(ref_raw)
         if len(icon_uris) < 3:
             return []
+        logger.info("已拆分 %s 个参考图标 (%.1fs)", len(icon_uris), time.monotonic() - t0)
 
+        logger.info("步骤 3/4: 下载主图并编码...")
         main_raw = self._download(main_url)
         if not main_raw:
             return []
         main_uri = "data:image/png;base64," + base64.b64encode(main_raw).decode("ascii")
+        logger.info("主图已下载 (%s bytes, %.1fs)", len(main_raw), time.monotonic() - t0)
 
+        logger.info("步骤 4/4: 调用大模型识别坐标 (key=%s)...", _mask_api_key(self.api_key))
         coords = self._find_all_icons(icon_uris, main_uri, main_width, main_height)
+        logger.info(
+            "大模型点选解算完成: 返回 %s 个坐标, 总耗时 %.1fs",
+            len(coords),
+            time.monotonic() - t0,
+        )
         if len(coords) < 2:
             return []
 
@@ -64,20 +115,25 @@ class ClickCaptchaSolver:
         ]
 
     def _download(self, url: str) -> Optional[bytes]:
+        source = "data URI" if url.startswith("data:") else url[:80]
         try:
             if url.startswith("data:"):
                 _, encoded = url.split(",", 1)
                 try:
-                    return base64.b64decode(encoded)
+                    data = base64.b64decode(encoded)
                 except Exception:
-                    return base64.b64decode(unquote(encoded))
+                    data = base64.b64decode(unquote(encoded))
+                logger.debug("图片下载完成: %s (%s bytes)", source, len(data))
+                return data
+            logger.debug("正在下载: %s...", source)
             resp = requests.get(url, timeout=15)
             if resp.status_code == 200:
+                logger.debug("图片下载完成: HTTP 200 (%s bytes)", len(resp.content))
                 return resp.content
-            logger.error("下载验证码图片失败: HTTP %s", resp.status_code)
+            logger.error("下载验证码图片失败: HTTP %s, url=%s", resp.status_code, source)
             return None
         except Exception as exc:
-            logger.error("下载验证码图片错误: %s", exc)
+            logger.error("下载验证码图片错误 (%s): %s", source, exc)
             return None
 
     def _split_strip(self, raw: bytes) -> List[str]:
@@ -97,10 +153,43 @@ class ClickCaptchaSolver:
                 icon.save(buf, format="PNG")
                 uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
                 uris.append(uri)
+                logger.info("参考图标 #%s: 放大后 %sx%s", i + 1, icon.width, icon.height)
             return uris
         except Exception as exc:
             logger.error("拆分参考图标条失败: %s", exc)
             return []
+
+    def _call_chat(self, content: list, *, json_mode: bool, label: str) -> str:
+        messages = [{"role": "user", "content": content}]
+        kwargs = {"model": self.model, "messages": messages, "max_tokens": 4096}
+        if json_mode:
+            kwargs["messages"] = [
+                {"role": "system", "content": "Output valid JSON only. No markdown, no explanation."},
+                {"role": "user", "content": content},
+            ]
+            kwargs["response_format"] = {"type": "json_object"}
+
+        mode = "JSON" if json_mode else "普通"
+        logger.info(
+            "正在请求大模型 API (%s 模式): %s/chat/completions, model=%s",
+            mode,
+            self.base_url.rstrip("/"),
+            self.model,
+        )
+
+        stop = threading.Event()
+        heartbeat = threading.Thread(
+            target=_wait_heartbeat, args=(stop, "大模型"), daemon=True
+        )
+        heartbeat.start()
+        t0 = time.monotonic()
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+            output = response.choices[0].message.content or ""
+            logger.info("大模型 API 响应完成 (%.1fs)", time.monotonic() - t0)
+            return output
+        finally:
+            stop.set()
 
     def _find_all_icons(
         self,
@@ -110,22 +199,11 @@ class ClickCaptchaSolver:
         main_height: int,
     ) -> List[Tuple[int, int]]:
         prompt = (
-            "你的任务是找图：3个参考图标分别在网格大图中的位置。\n\n"
-            "## 第一步：观察参考图标\n"
-            "仔细看3个参考图标，在脑中记住每个图标的：形状轮廓、主要颜色、内部细节、旋转方向。\n"
-            "注意3个图标是不同的，它们的颜色和/或形状一定有区别。\n\n"
-            "## 第二步：扫描大图网格\n"
-            f"大图（{main_width}×{main_height}像素）是一个图标网格（约4×4或3×3排列）。\n"
-            "逐行逐列扫描每个网格中的图标，找到与3个参考图标匹配的。\n\n"
-            "## 匹配规则\n"
-            "- 匹配图标与参考图标的形状和颜色必须一致（允许旋转，但旋转角度不影响匹配）\n"
-            "- 网格中可能有多个颜色相同的图标，但形状细节不同——请仔细辨别\n"
-            "- 空心/实心、线条粗细、是否有圆点等细节是关键区分点\n"
-            "- 3个目标图标在网格中的位置各不相同\n\n"
-            "## 输出\n"
-            "先简要说明每个参考图标的特征和匹配位置，然后输出一行坐标：\n"
-            "(x1, y1), (x2, y2), (x3, y3)\n"
-            "其中x、y为图标中心的比例坐标（0~1），分别对应图标A、B、C。"
+            f"大图（{main_width}×{main_height}像素）是一个图标网格。\n"
+            "找到3个参考图标(A, B, C)各自在大图网格中的位置。\n"
+            "匹配规则：形状和颜色必须一致，空心/实心、线条粗细是关键区分点，允许旋转。\n\n"
+            '输出JSON：{"coords":[[xA,yA],[xB,yB],[xC,yC]]}\n'
+            "其中x、y为图标中心的比例坐标（0~1）。"
         )
 
         content = []
@@ -133,18 +211,27 @@ class ClickCaptchaSolver:
         for i, uri in enumerate(icon_uris[:3]):
             content.append({"type": "image_url", "image_url": {"url": uri}})
             content.append({"type": "text", "text": f"参考图标{labels[i]}"})
-
         content.append({"type": "image_url", "image_url": {"url": main_uri}})
         content.append({"type": "text", "text": prompt})
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": content}],
-                max_tokens=500,
-            )
-            output = response.choices[0].message.content or ""
+            output = self._call_chat(content, json_mode=True, label="点选")
             logger.info("大模型响应: %s", output[:400])
+            coords = self._parse_coordinates(output, main_width, main_height)
+            if coords:
+                return coords
+            logger.warning("JSON 模式响应无法解析坐标，尝试普通模式")
+        except Exception as exc:
+            logger.warning("JSON 模式调用失败，尝试普通模式: %s", exc)
+
+        return self._find_all_icons_fallback(content, main_width, main_height)
+
+    def _find_all_icons_fallback(
+        self, content: list, main_width: int, main_height: int
+    ) -> List[Tuple[int, int]]:
+        try:
+            output = self._call_chat(content, json_mode=False, label="点选")
+            logger.info("大模型响应(普通模式): %s", output[:400])
             return self._parse_coordinates(output, main_width, main_height)
         except Exception as exc:
             logger.error("大模型调用失败: %s", exc)
@@ -153,6 +240,21 @@ class ClickCaptchaSolver:
     def _parse_coordinates(
         self, text: str, main_width: int, main_height: int
     ) -> List[Tuple[int, int]]:
+        match = re.search(r'\{.*"coords"\s*:\s*\[.*?\]\s*\}', text, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group())
+                result = []
+                for x, y in data["coords"]:
+                    x, y = float(x), float(y)
+                    if max(x, y) <= 1.5:
+                        result.append((round(x * main_width), round(y * main_height)))
+                    else:
+                        result.append((round(x), round(y)))
+                return result
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                pass
+
         coords = []
         paren_pairs = re.findall(r"\(\s*(\d+\.?\d*)\s*[,，]\s*(\d+\.?\d*)\s*\)", text)
         for x_str, y_str in paren_pairs:

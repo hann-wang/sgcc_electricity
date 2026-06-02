@@ -19,7 +19,7 @@ from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from captcha_solver.llm_solver import ClickCaptchaSolver
+from captcha_solver.llm_solver import ClickCaptchaSolver, llm_api_key, llm_base_url, llm_model
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ def solve_captcha_in_browser(
     selectors = selectors or TENCENT_SELECTORS
     solver = solver or ClickCaptchaSolver()
     if not solver.api_key:
-        raise RuntimeError("ARK_API_KEY 未设置，无法使用 LLM 验证码识别")
+        raise RuntimeError("LLM_API_KEY 未设置，无法使用 LLM 验证码识别")
 
     implicit_wait_backup = None
     try:
@@ -123,6 +123,11 @@ def solve_captcha_in_browser(
         logger.info("主图尺寸=%s", main_size)
         _save_debug_images(ref_url, main_url)
 
+        logger.info(
+            "调用大模型解算点选验证码 (model=%s, endpoint=%s)...",
+            llm_model(),
+            llm_base_url(),
+        )
         coords = solver.solve(ref_url, main_url, main_size[0], main_size[1])
         if not coords or len(coords) < 2:
             logger.warning("大模型仅返回 %s 个坐标，正在刷新...", len(coords or []))
@@ -225,7 +230,8 @@ def _solve_slider(driver: WebDriver, selectors: dict) -> bool:
         try:
             bg_bytes = bg_el.screenshot_as_png
             bg_url = "data:image/png;base64," + base64.b64encode(bg_bytes).decode()
-        except Exception:
+        except Exception as exc:
+            logger.error("无法获取滑块背景图片，错误详情: %s", exc)
             return False
 
     groove = _find_element(driver, selectors.get("slider_groove"), wait=1.0)
@@ -237,16 +243,21 @@ def _solve_slider(driver: WebDriver, selectors: dict) -> bool:
     groove_width = groove.size.get("width", 300)
     logger.info("滑块轨道宽度: %s", groove_width)
 
-    api_key = os.getenv("ARK_API_KEY", "").strip()
+    api_key = llm_api_key()
     if not api_key:
-        logger.error("ARK_API_KEY 未设置，无法解算滑块验证码")
+        logger.error("LLM_API_KEY 未设置，无法解算滑块验证码")
         return False
 
     try:
         from openai import OpenAI
 
+        logger.info(
+            "调用大模型解算滑块验证码 (model=%s, endpoint=%s)...",
+            llm_model(),
+            llm_base_url(),
+        )
         client = OpenAI(
-            base_url=os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
+            base_url=llm_base_url(),
             api_key=api_key,
         )
 
@@ -262,7 +273,8 @@ def _solve_slider(driver: WebDriver, selectors: dict) -> bool:
         bg_uri = "data:image/png;base64," + base64.b64encode(bg_data).decode()
         img = Image.open(io.BytesIO(bg_data))
         bg_w, bg_h = img.size
-        model = os.getenv("ARK_MODEL", "doubao-seed-2-0-pro-260215")
+        model = llm_model()
+        logger.info("正在请求大模型 API 识别滑块缺口 (model=%s)...", model)
 
         response = client.chat.completions.create(
             model=model,

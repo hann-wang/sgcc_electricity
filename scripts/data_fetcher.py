@@ -305,7 +305,7 @@ class DataFetcher:
                 "profile.password_manager_enabled": False,
             },
         )
-        return chrome_options, browser_language_primary
+        return chrome_options, browser_language_primary, browser_window_size, browser_device_scale_factor
 
     def _get_webdriver(self):
         logging.info(f"正在初始化 WebDriver, 平台: {platform.system()}")
@@ -329,9 +329,10 @@ class DataFetcher:
             )
             driver.implicitly_wait(self.DRIVER_IMPLICITY_WAIT_TIME)
             self._inject_stealth_cdp(driver)
+            driver.maximize_window()
         else:
             in_docker = "PYTHON_IN_DOCKER" in os.environ
-            chrome_options, _ = self._build_chrome_options(in_docker)
+            chrome_options, _, window_size, device_scale = self._build_chrome_options(in_docker)
             if in_docker:
                 chrome_options.add_argument("--headless=new")
                 chrome_options.binary_location = "/usr/bin/chromium"
@@ -344,6 +345,24 @@ class DataFetcher:
             driver = webdriver.Chrome(options=chrome_options, service=service)
             driver.implicitly_wait(self.DRIVER_IMPLICITY_WAIT_TIME)
             self._inject_stealth_cdp(driver)
+            if in_docker:
+                width, height = map(int, window_size.split(","))
+                driver.set_window_size(width, height)
+                try:
+                    driver.execute_cdp_cmd(
+                        "Emulation.setDeviceMetricsOverride",
+                        {
+                            "width": width,
+                            "height": height,
+                            "deviceScaleFactor": int(device_scale),
+                            "mobile": False,
+                            "dontSetVisibleSize": False,
+                        },
+                    )
+                except Exception as exc:
+                    logging.warning("CDP 设置 viewport 失败: %s", exc)
+            else:
+                driver.maximize_window()
 
         logging.info("WebDriver 初始化完成")
         return driver
@@ -376,8 +395,10 @@ class DataFetcher:
     def _solve_captcha(self, driver) -> bool:
         """根据 CAPTCHA_SOLVER 环境变量选择 LLM 或本地识别。"""
         if self._captcha_solver == "llm":
-            if not os.getenv("ARK_API_KEY", "").strip():
-                logging.error("CAPTCHA_SOLVER=llm 但未配置 ARK_API_KEY")
+            from captcha_solver.llm_solver import llm_api_key
+
+            if not llm_api_key():
+                logging.error("CAPTCHA_SOLVER=llm 但未配置 LLM_API_KEY")
                 return False
             logging.info("使用 LLM 大模型识别验证码")
             from captcha_solver.browser_llm import solve_captcha_in_browser
@@ -469,8 +490,14 @@ class DataFetcher:
                         if driver.current_url != LOGIN_URL:
                             logging.info("验证码识别成功, 已通过验证!")
                             return True
+                    error = self._get_error_message(driver, "//div[@class='errmsg-tip']//span")
+                    reason = (
+                        f"验证码识别失败: {error}"
+                        if error
+                        else "验证码识别多次失败，已切换扫码登录"
+                    )
                     logging.error("验证码识别多次失败, 尝试备选登录方案")
-                    return self._fallback_login(driver)
+                    return self._fallback_login(driver, reason=reason)
                 elif post_login_state == "error":
                     error = self._get_error_message(driver, "//div[@class='errmsg-tip']//span")
                     logging.info(f"登录错误信息: {error}")
@@ -501,7 +528,11 @@ class DataFetcher:
                             pass
                         continue
 
-            return self._fallback_login(driver)
+            error = self._get_error_message(driver, "//div[@class='errmsg-tip']//span")
+            reason = (
+                f"密码登录失败: {error}" if error else "密码登录失败，已切换扫码登录"
+            )
+            return self._fallback_login(driver, reason=reason)
 
     def _get_error_message(self, driver, path) -> Optional[str]:
         """获取错误信息，如果不存在则返回 None"""
@@ -515,12 +546,12 @@ class DataFetcher:
         finally:
             driver.implicitly_wait(self.DRIVER_IMPLICITY_WAIT_TIME)  # 恢复隐式等待
 
-    def _fallback_login(self, driver) -> bool:
+    def _fallback_login(self, driver, reason: str = "密码登录失败，已切换扫码登录") -> bool:
         """使用 fallback 登录"""
         fallback = os.getenv("LOGIN_FALLBACK", "").strip().lower()
         if fallback == "qrcode":
-            logging.info("密码登录失败，切换为扫码登录 (LOGIN_FALLBACK=qrcode)")
-            return self._qr_login(driver, reason="密码登录失败，已切换扫码登录")
+            logging.info("密码登录失败，切换为扫码登录 (LOGIN_FALLBACK=qrcode): %s", reason)
+            return self._qr_login(driver, reason=reason)
         return False
 
     def _qr_login(self, driver, reason: str = "扫码登录") -> bool:
@@ -587,8 +618,7 @@ class DataFetcher:
 
         driver = self._get_webdriver()
         ErrorWatcher.instance().set_driver(driver)
-        
-        driver.maximize_window() 
+
         time.sleep(self._step_wait)
         logging.info("WebDriver 已就绪")
         updator = SensorUpdator()
