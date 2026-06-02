@@ -540,9 +540,9 @@
 
     async function bootstrap() {
       const cfg = await fetch("/api/config").then(r => r.json());
-      loginRequired = cfg.login_required !== false;
+      loginRequired = !!cfg.login_required;
       dbEnabled = cfg.db_enabled !== false;
-      if (!sessionToken) { showLogin(true); return; }
+      if (loginRequired && !sessionToken) { showLogin(true); return; }
       showLogin(false);
       await refreshAll();
       setInterval(loadStatus, 8000);

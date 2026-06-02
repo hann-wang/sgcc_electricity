@@ -54,14 +54,11 @@ def _dashboard_port() -> int:
 
 
 def _dashboard_password() -> str:
-    raw = os.getenv("WEB_DASHBOARD_PASSWORD")
-    if raw is None or not str(raw).strip():
-        return "password"
-    return str(raw).strip()
+    return os.getenv("WEB_DASHBOARD_PASSWORD", "").strip()
 
 
 def _login_required() -> bool:
-    return True
+    return bool(_dashboard_password())
 
 
 def _check_session(x_dashboard_session: Optional[str]) -> None:
@@ -142,10 +139,9 @@ def _register_routes(router: APIRouter) -> None:
     @router.post("/api/login")
     def api_login(body: dict = Body(...)):
         password = body.get("password", "")
-        expected = _dashboard_password()
-        if not expected:
-            raise HTTPException(status_code=500, detail="控制台未配置密码")
-        if password != expected:
+        if not _login_required():
+            return {"ok": True, "token": "", "message": "未设置密码，无需登录"}
+        if password != _dashboard_password():
             raise HTTPException(status_code=401, detail="密码错误")
         token = secrets.token_urlsafe(32)
         _sessions[token] = time.time() + _SESSION_TTL

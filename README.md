@@ -33,7 +33,7 @@
 
 ### Web 控制台（效果预览）
 
-启用 `WEB_DASHBOARD=true` 后，访问 `http://<主机>:8080/` 登录即可查看多户用电概览、阶梯用电、日/月图表与同步记录。默认登录密码为 `password`（请在 `.env` 中修改 `WEB_DASHBOARD_PASSWORD`）。
+启用 `WEB_DASHBOARD=true` 后，访问 `http://<主机>:8080/` 查看多户用电概览、阶梯用电、日/月图表与同步记录。设置 `WEB_DASHBOARD_PASSWORD` 可启用登录保护，留空则无需登录。
 
 | 登录页 | 监控大屏 |
 |:---:|:---:|
@@ -282,7 +282,7 @@ Docker Compose 方式通过 `.env` 文件配置，完整配置项见 `example.en
 | `WEWORK_PUSH_SUMMARY` | true | 抓取成功后推送多户汇总 |
 | `WEB_DASHBOARD` | true | 启用 Web 控制台（[说明](docs/WEB_DASHBOARD.md)） |
 | `WEB_DASHBOARD_PORT` | 8080 | 控制台端口（`docker-compose` 映射宿主机端口） |
-| `WEB_DASHBOARD_PASSWORD` | password | 控制台登录密码 |
+| `WEB_DASHBOARD_PASSWORD` | — | 控制台登录密码（留空则无需登录） |
 | `FETCH_COOLDOWN_MINUTES` | 30 | 手动同步冷却时间 |
 | `BALANCE` | 5.0 | 余额低于此值时通知（需开启 PUSH_TYPE） |
 
