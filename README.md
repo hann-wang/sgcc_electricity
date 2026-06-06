@@ -34,14 +34,14 @@
 |---------|---------|---------------|
 | **配置复杂度** | 需配置 template | 只需配置 MQTT 地址 |
 | **实体创建** | 手动配置 template | 自动发现创建 |
-| **配置文档** | [docs/HA_CONFIG.md](docs/HA_CONFIG.md) | [docs/MQTT.md](docs/MQTT.md) |
+| **配置说明** | [REST API 配置指南](docs/HA_CONFIG.md) | [MQTT 使用指南](docs/MQTT.md) |
 | **兼容性** | 所有 HA 版本 | 需要 MQTT 集成 |
 | **状态保持** | 需要缓存恢复 | retain 消息自动保持 |
 | **网络开销** | HTTP 协议 | 轻量级 MQTT |
 
 > **推荐**：MQTT Discovery 方式配置更简单，实体自动创建，详见 [MQTT 使用指南](docs/MQTT.md)。
 >
-> REST API 方式需要在 HA 的 `configuration.yaml` 中配置 template，详见 [HA 配置说明](docs/HA_CONFIG.md)。
+> REST API 方式需要在 HA 的 `configuration.yaml` 中配置 template，详见 [REST API 配置指南](docs/HA_CONFIG.md)。
 
 两种方式共享相同的实体命名（`sensor.xxx_xxxx`），现有卡片无需修改即可在两种方式间切换。
 
@@ -91,7 +91,7 @@ docker compose up -d --force-recreate
 
 ### 方式三：本地运行
 
-详见 [LOCAL_DEV_GUIDE.md](LOCAL_DEV_GUIDE.md)
+详见 [本地开发指南](LOCAL_DEV_GUIDE.md)
 
 ---
 
@@ -114,7 +114,7 @@ Docker Compose 方式通过 `.env` 文件配置，完整配置项见 `example.en
 |------|--------|------|
 | `JOB_START_TIME` | `09:30` | 每天同步开始时间（程序会在该时间及 +12 小时各执行一次） |
 | `RUN_ON_STARTUP` | `false` | Docker 启动后立即登录抓取 |
-| `CAPTCHA_SOLVER` | `local` | 验证码识别：`local` 本地 OCR / `llm` 豆包大模型（[接入指南](docs/LLM_CAPTCHA.md)） |
+| `CAPTCHA_SOLVER` | `local` | 验证码识别（推荐 `llm`，详见下方说明） |
 | `DB_TYPE` | sqlite | 数据库类型（sqlite / mysql / postgresql / none） |
 | `LOGIN_METHOD` | password | 登录方式（password / qrcode） |
 | `LOGIN_FALLBACK` | qrcode | 登录失败备选（qrcode / none） |
@@ -161,7 +161,7 @@ Docker Compose 方式通过 `.env` 文件配置，完整配置项见 `example.en
 | `postgresql` | 连接外部 PostgreSQL |
 | `none` | 不写入数据库；当月分时传感器不会更新 |
 
-启用数据库后程序自动建表，详见 [docs/DATABASE.md](docs/DATABASE.md)。
+启用数据库后程序自动建表，详见 [数据库表结构说明](docs/DATABASE.md)。
 
 当月谷/平/峰/尖传感器依赖数据库从 `daily_usage` 表 SQL 汇总，`DB_TYPE=none` 时这四个传感器不会更新。
 
@@ -171,26 +171,18 @@ Docker Compose 方式通过 `.env` 文件配置，完整配置项见 `example.en
 
 | 模式 | 配置值 | 说明 |
 |------|--------|------|
-| 本地 OCR（**默认**） | `local` | 免费，基于 ddddocr + 图像匹配，适合点选验证码 |
-| 大模型视觉识别 | `llm` | 火山引擎豆包，支持点选 + 滑块（[接入指南](docs/LLM_CAPTCHA.md)） |
+| 大模型视觉识别（**推荐**） | `llm` | 火山引擎豆包大模型，识别率高，支持点选 + 滑块 |
+| 本地 OCR | `local` | 免费，基于 ddddocr + 图像匹配，适合点选验证码，存在识别失败的情况 |
 
-本地 OCR 无法满足时可切换大模型模式，或直接使用 `LOGIN_METHOD=qrcode` 扫码登录绕过验证码。
+> **推荐使用 `llm` 模式**：本地 OCR 方案基于图像匹配，受验证码样式变化影响较大，存在识别失败的情况。大模型方式识别率更高且同时支持点选和滑块验证码。
+>
+> 两种方式的详细配置说明见 [验证码接入指南](docs/LLM_CAPTCHA.md)。如不想处理验证码，可直接使用 `LOGIN_METHOD=qrcode` 扫码登录。
 
 ---
 
 ## 常见问题
 
-**Q: 验证码识别失败**
-> 检查 `data/pages/` 下的调试截图。可切换 `CAPTCHA_SOLVER=llm` 或 `LOGIN_METHOD=qrcode` 扫码登录。
-
-**Q: 阶梯用电传感器无数据**
-> 仅住宅用户（户名含「住宅」）有阶梯数据，充电桩等非住宅户号会自动跳过。
-
-**Q: 分时电量数据为空**
-> 当月谷/平/峰/尖传感器依赖数据库：请确认 `DB_TYPE` 不是 `none`。
-
-**Q: HA Add-on 启动报 Duplicate mount point**
-> 卸载重装 Add-on。
+详见 [常见问题文档](docs/FAQ.md)，涵盖验证码识别、传感器数据、数据库选择、HA 集成等常见问题。
 
 ---
 

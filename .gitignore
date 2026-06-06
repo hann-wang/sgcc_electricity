@@ -15,6 +15,7 @@ docs/*
 !docs/MQTT.md
 !docs/MQTT_TEST.md
 !docs/CHANGELOG.md
+!docs/FAQ.md
 !docs/RELEASE_*.md
 !docs/WEB_DASHBOARD.md
 !docs/attachment/
