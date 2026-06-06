@@ -36,6 +36,27 @@ https://github.com/Poiig/ha_sgcc_electricity
 
 完整配置项在 add-on 配置页面中都有说明。
 
+## Web 控制台
+
+Add-on 默认启用 Web 控制台，可通过 `http://homeassistant.local:8080` 访问，查看运行日志、户号数据、图表，并支持手动触发同步。
+
+### 集成到 Home Assistant 界面
+
+只需在 `configuration.yaml` 中添加几行配置，即可将 Web 控制台直接嵌入到 Home Assistant 左侧菜单中：
+
+```yaml
+panel_iframe:
+  国家电网:
+    title: 国家电网电费数据
+    url: "http://homeassistant.local:8080"
+    icon: mdi:lightning-bolt
+    require_admin: true
+```
+
+重启 Home Assistant 后，左侧菜单底部会出现「国家电网」入口，点击即可全屏访问 Web 控制台。
+
+> 详细说明见 [面板集成指南](../../docs/HA_PANEL.md) 或 [快速指南](../../docs/QUICK_PANEL.md)。
+
 ## 说明
 
 本 add-on 通过 REST API 将数据推送到 Home Assistant，需要在 `configuration.yaml` 中配置 template 实体。详见主项目 README。

@@ -35,6 +35,21 @@
 
 启用 `WEB_DASHBOARD=true` 后，访问 `http://<主机>:8080/` 查看多户用电概览、阶梯用电、日/月图表与同步记录。设置 `WEB_DASHBOARD_PASSWORD` 可启用登录保护，留空则无需登录。
 
+**集成到 Home Assistant 界面**（推荐）：
+
+只需在 `configuration.yaml` 中添加几行配置，即可将 Web 控制台直接嵌入到 Home Assistant 左侧菜单中，点击即可全屏访问：
+
+```yaml
+panel_iframe:
+  国家电网:
+    title: 国家电网电费数据
+    url: "http://homeassistant.local:8080"
+    icon: mdi:lightning-bolt
+    require_admin: true
+```
+
+> 详细说明见 [面板集成指南](docs/HA_PANEL.md) 或 [快速指南](docs/QUICK_PANEL.md)。
+
 | 登录页 | 监控大屏 |
 |:---:|:---:|
 | ![Web 控制台登录页](docs/attachment/login.png) | ![Web 控制台监控页](docs/attachment/controller.png) |
