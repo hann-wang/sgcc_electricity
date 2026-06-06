@@ -37,16 +37,7 @@
 
 **集成到 Home Assistant 界面**（推荐）：
 
-只需在 `configuration.yaml` 中添加几行配置，即可将 Web 控制台直接嵌入到 Home Assistant 左侧菜单中，点击即可全屏访问：
-
-```yaml
-panel_iframe:
-  国家电网:
-    title: 国家电网电费数据
-    url: "http://homeassistant.local:8080"
-    icon: mdi:lightning-bolt
-    require_admin: true
-```
+通过 HA 的 **Webpage 仪表盘** 功能，可将 Web 控制台直接嵌入左侧菜单。操作步骤：**设置** → **仪表盘** → **添加仪表盘** → 选择 **Webpage** → 填写 URL（`http://HA地址:8080`）即可。
 
 > 详细说明见 [面板集成指南](docs/HA_PANEL.md) 或 [快速指南](docs/QUICK_PANEL.md)。
 
