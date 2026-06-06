@@ -1230,6 +1230,18 @@ class DataFetcher:
         else:
             logging.info(f"[{user_id}] 未配置数据库, 跳过数据存储")
 
+        # 数据库写入完成后，从数据库查询最新日用电记录作为传感器推送值
+        # 避免国网页面抓取失败时传感器数据不准确
+        if self.db is not None:
+            try:
+                db_last = self._query_last_daily_from_db(user_id)
+                if db_last:
+                    last_daily_date = db_last.get("date", last_daily_date)
+                    last_daily_usage = db_last.get("total_usage", last_daily_usage)
+                    logging.info(f"[{user_id}] 传感器最近日用电取自数据库: {last_daily_date} {last_daily_usage} kWh")
+            except Exception:
+                pass
+
         last_month_period = month[-1] if month else None
         if month_charge:
             month_charge = month_charge[-1]
@@ -1241,6 +1253,35 @@ class DataFetcher:
             month_usage = None
 
         return balance, last_daily_date, last_daily_usage, yearly_charge, yearly_usage, month_charge, month_usage, tou_data, enhanced_balance, step_data, last_month_period
+
+    def _query_last_daily_from_db(self, user_id: str):
+        """从数据库查询最新一条日用电记录，用于传感器推送"""
+        from db import create_db
+        db = create_db()
+        if db is None:
+            return None
+        if not db.connect_user_db(user_id):
+            return None
+        try:
+            cursor = db.connect.cursor()
+            try:
+                placeholder = "%s" if self.db_type in ("mysql", "postgresql") else "?"
+                cursor.execute(
+                    f"SELECT date, total_usage FROM daily_usage WHERE user_id={placeholder} ORDER BY date DESC LIMIT 1",
+                    (str(user_id).strip(),),
+                )
+                row = cursor.fetchone()
+                if row:
+                    if hasattr(row, 'keys'):
+                        return dict(row)
+                    return {"date": row[0], "total_usage": row[1]}
+                return None
+            finally:
+                cursor.close()
+        except Exception:
+            return None
+        finally:
+            db.close_connect()
 
     def _db_insert(self, user_id: str, label: str, func, *args, **kwargs) -> bool:
         """执行数据库写入并记录结果，避免静默失败"""
