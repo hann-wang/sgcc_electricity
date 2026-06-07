@@ -30,6 +30,7 @@ jobs:
       packages: write
     with:
       force_rebuild: ${{ inputs.force_rebuild_base || false }}
+    secrets: inherit
 
   build-and-push:
     needs: check-base-image
