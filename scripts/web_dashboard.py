@@ -36,6 +36,7 @@ _fetch_thread: Optional[threading.Thread] = None
 _server_threads: List[threading.Thread] = []
 _sessions: dict[str, float] = {}
 _SESSION_TTL = 7 * 86400
+_mqtt_updator = None  # 全局 MQTT 更新器实例，避免重复创建连接
 
 
 def _dashboard_enabled() -> bool:
@@ -272,17 +273,21 @@ def _register_routes(router: APIRouter) -> None:
     @router.post("/api/mqtt/republish", dependencies=[Depends(require_auth)])
     def api_mqtt_republish():
         """立即从缓存重新发布 MQTT 数据。"""
+        global _mqtt_updator
         try:
             from mqtt_sensor_updator import MQTTSensorUpdator
-            updator = MQTTSensorUpdator()
 
-            if not updator.mqtt_client.mqtt_host:
+            # 复用全局实例，避免重复创建 MQTT 连接
+            if _mqtt_updator is None:
+                _mqtt_updator = MQTTSensorUpdator()
+
+            if not _mqtt_updator.mqtt_client.mqtt_host:
                 raise HTTPException(status_code=400, detail="MQTT 未配置")
 
-            if not updator.mqtt_client.connected:
+            if not _mqtt_updator.mqtt_client.connected:
                 raise HTTPException(status_code=503, detail="MQTT 未连接")
 
-            success = updator.republish()
+            success = _mqtt_updator.republish()
             if success:
                 logger.info("已通过 Web 控制台触发 MQTT 重新发布")
                 return {"ok": True, "message": "MQTT 数据已重新发布"}
