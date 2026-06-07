@@ -75,6 +75,12 @@ def main():
     if MQTT_HOST:
         updator = MQTTSensorUpdator()
         logging.info(f"使用 MQTT Discovery 方式推送数据到: {MQTT_HOST}")
+        # 注册到 web_dashboard，避免"立即推送"创建重复 MQTT 连接
+        try:
+            from web_dashboard import register_mqtt_updator
+            register_mqtt_updator(updator)
+        except Exception:
+            pass
     else:
         updator = SensorUpdator()
         logging.info(f"使用 REST API 方式推送数据到: {HASS_URL}")

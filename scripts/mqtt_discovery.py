@@ -66,43 +66,61 @@ class MQTTDiscoveryClient:
     def _cleanup_legacy_topics(self):
         """清除旧版本（entity_id 含 sensor. 前缀）遗留的 discovery retain 消息。
 
-        通过订阅 MQTT wildcard topic 动态发现所有旧格式的 config topic，
-        即 homeassistant/sensor/sensor.xxx/config 模式的残留消息，
-        然后发送空 payload 清除 retain。
+        旧版本的 config topic 格式为 homeassistant/sensor/sensor.xxx_yyyy/config，
+        遍历所有已知的传感器名和用户后缀组合，发送空 payload 清除 retain。
         """
         if not self.client or not self.connected:
             return
 
-        legacy_topics = []
-
-        def _on_legacy_message(client, userdata, msg):
-            if msg.payload:
-                topic = msg.topic
-                # 只收集旧格式 topic（第三段以 sensor. 开头）
-                parts = topic.split("/")
-                if len(parts) == 4 and parts[2].startswith("sensor."):
-                    legacy_topics.append(topic)
-
-        # 使用 MQTT 单级通配符 + 匹配第三段
-        wildcard = f"{self.mqtt_topic_prefix}/sensor/+/config"
-        self.client.subscribe(wildcard)
-        self.client.message_callback_add(wildcard, _on_legacy_message)
-
-        # 等待 retain 消息到达
-        time.sleep(3)
-
-        # 取消订阅和回调
-        self.client.unsubscribe(wildcard)
-        self.client.message_callback_remove(wildcard)
+        from const import (
+            BALANCE_SENSOR_NAME, DAILY_USAGE_SENSOR_NAME, YEARLY_USAGE_SENSOR_NAME,
+            YEARLY_CHARGE_SENSOR_NAME, MONTH_USAGE_SENSOR_NAME, MONTH_CHARGE_SENSOR_NAME,
+            MONTH_VALLEY_SENSOR_NAME, MONTH_FLAT_SENSOR_NAME, MONTH_PEAK_SENSOR_NAME,
+            MONTH_TIP_SENSOR_NAME, PREPAY_BALANCE_SENSOR_NAME,
+            STEP_USED_STEP1_SENSOR_NAME, STEP_REMAIN_STEP1_SENSOR_NAME,
+            STEP_USED_STEP2_SENSOR_NAME, STEP_REMAIN_STEP2_SENSOR_NAME,
+            STEP_USED_STEP3_SENSOR_NAME, STEP_TOTAL_USAGE_SENSOR_NAME,
+            STEP_STAGE_SENSOR_NAME,
+        )
+        sensor_bases = [
+            BALANCE_SENSOR_NAME, DAILY_USAGE_SENSOR_NAME, YEARLY_USAGE_SENSOR_NAME,
+            YEARLY_CHARGE_SENSOR_NAME, MONTH_USAGE_SENSOR_NAME, MONTH_CHARGE_SENSOR_NAME,
+            MONTH_VALLEY_SENSOR_NAME, MONTH_FLAT_SENSOR_NAME, MONTH_PEAK_SENSOR_NAME,
+            MONTH_TIP_SENSOR_NAME, PREPAY_BALANCE_SENSOR_NAME,
+            STEP_USED_STEP1_SENSOR_NAME, STEP_REMAIN_STEP1_SENSOR_NAME,
+            STEP_USED_STEP2_SENSOR_NAME, STEP_REMAIN_STEP2_SENSOR_NAME,
+            STEP_USED_STEP3_SENSOR_NAME, STEP_TOTAL_USAGE_SENSOR_NAME,
+            STEP_STAGE_SENSOR_NAME,
+        ]
+        # 从缓存文件中读取所有用户后缀
+        suffixes = set()
+        try:
+            import json as _json
+            cache_file = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'sgcc_cache.json'
+            )
+            if os.path.exists(cache_file):
+                with open(cache_file, 'r') as f:
+                    cache_data = _json.load(f)
+                for uid in cache_data:
+                    suffixes.add(f"_{uid[-4:]}")
+        except Exception:
+            pass
+        # 如果缓存为空，使用默认后缀
+        if not suffixes:
+            suffixes = {"_1372", "_9963"}
 
         cleaned = 0
-        for topic in legacy_topics:
-            # 清除 config / state / attributes 三类 topic
-            base_topic = topic[:-len("/config")]
-            self.client.publish(topic, "", retain=True)
-            self.client.publish(f"{base_topic}/state", "", retain=True)
-            self.client.publish(f"{base_topic}/attributes", "", retain=True)
-            cleaned += 1
+        for base in sensor_bases:
+            object_id = base.replace("sensor.", "")
+            for suffix in suffixes:
+                legacy_topic = f"{self.mqtt_topic_prefix}/sensor/sensor.{object_id}{suffix}/config"
+                self.client.publish(legacy_topic, "", retain=True)
+                legacy_state = f"{self.mqtt_topic_prefix}/sensor/sensor.{object_id}{suffix}/state"
+                self.client.publish(legacy_state, "", retain=True)
+                legacy_attrs = f"{self.mqtt_topic_prefix}/sensor/sensor.{object_id}{suffix}/attributes"
+                self.client.publish(legacy_attrs, "", retain=True)
+                cleaned += 1
         if cleaned:
             logging.info("已清除 %d 组旧版 MQTT Discovery retain 消息", cleaned)
 

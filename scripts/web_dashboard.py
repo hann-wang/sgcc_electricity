@@ -36,7 +36,13 @@ _fetch_thread: Optional[threading.Thread] = None
 _server_threads: List[threading.Thread] = []
 _sessions: dict[str, float] = {}
 _SESSION_TTL = 7 * 86400
-_mqtt_updator = None  # 全局 MQTT 更新器实例，避免重复创建连接
+_mqtt_updator = None  # 全局 MQTT 更新器实例，由 main.py 注册，避免重复创建连接
+
+
+def register_mqtt_updator(updator):
+    """注册外部创建的 MQTTSensorUpdator 实例，供立即推送等 API 复用。"""
+    global _mqtt_updator
+    _mqtt_updator = updator
 
 
 def _dashboard_enabled() -> bool:
