@@ -1,5 +1,7 @@
 import logging
+import os
 import re
+from collections import Counter
 from copy import deepcopy
 from functools import lru_cache
 from io import BytesIO
@@ -50,7 +52,33 @@ def capture_element_image(driver, element, scroll_to_center: bool = True) -> byt
 class PointClickImageSolver:
     """Solve point-click captchas from answer and candidate images."""
 
-    ROTATION_ANGLES = (-180, -135, -90, -60, -45, -35, -25, -15, -8, 0, 8, 15, 25, 35, 45, 60, 90, 135, 180)
+    ROTATION_ANGLES = (
+        -180,
+        -135,
+        -90,
+        -60,
+        -45,
+        -40,
+        -35,
+        -30,
+        -25,
+        -20,
+        -15,
+        -8,
+        0,
+        8,
+        15,
+        20,
+        25,
+        30,
+        35,
+        40,
+        45,
+        60,
+        90,
+        135,
+        180,
+    )
     COMPLEX_ICON_SIZE_THRESHOLD = 22
 
     def __init__(self):
@@ -262,6 +290,9 @@ class PointClickImageSolver:
         token = token.replace("G", "6")
         token = token.replace("O", "0")
         token = token.replace("o", "0")
+        token = token.replace("I", "1")
+        token = token.replace("l", "1")
+        token = token.replace("i", "1")
         return token
 
     @staticmethod
@@ -281,6 +312,57 @@ class PointClickImageSolver:
         elif token == "8":
             aliases.update({"8", "B", "b"})
         return aliases
+
+    def ocr_aliases(self, tokens) -> set[str]:
+        aliases = set()
+        for token in tokens or []:
+            aliases.update(self.token_aliases(token))
+        return aliases
+
+    @staticmethod
+    def _image_to_png_bytes(image: Image.Image) -> bytes:
+        buf = BytesIO()
+        image.save(buf, format="PNG")
+        return buf.getvalue()
+
+    @staticmethod
+    def _array_to_png_bytes(array: np.ndarray) -> bytes:
+        return PointClickImageSolver._image_to_png_bytes(Image.fromarray(array.astype(np.uint8)))
+
+    def ocr_ensemble(self, ocr, image: Image.Image) -> tuple[str, float, set[str]]:
+        """Run ddddocr on several lightweight preprocessings and vote.
+
+        Tencent point-click crops often contain thin, low-contrast strokes. A
+        single OCR pass is brittle, so this mirrors the proven local strategy
+        from glm-coding-grabber while keeping it embedded in our solver.
+        """
+        variants = []
+        gray = np.array(image.convert("L"))
+        variants.append(self._image_to_png_bytes(image.convert("RGB")))
+        if cv2 is not None:
+            _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            variants.append(self._array_to_png_bytes(otsu))
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+            variants.append(self._array_to_png_bytes(clahe.apply(gray)))
+            blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+            _, blur_otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            variants.append(self._array_to_png_bytes(blur_otsu))
+        variants.append(self._array_to_png_bytes(255 - gray))
+
+        tokens = []
+        for data in variants:
+            try:
+                token = self.normalize_ocr_token(ocr.classification(data))
+            except Exception:
+                token = ""
+            if token:
+                tokens.append(token)
+
+        if not tokens:
+            return "", 0.0, set()
+        counter = Counter(tokens)
+        token, count = counter.most_common(1)[0]
+        return token, count / len(tokens), set(tokens)
 
     def solve_widget_mixed_ocr(self, answer_image: Image.Image, bg_image: Image.Image, candidate_box):
         det, ocr = self._load_ddddocr()
@@ -302,44 +384,50 @@ class PointClickImageSolver:
 
         def classify_box(image: Image.Image, box):
             crop = image.crop(tuple(box))
-            buf = BytesIO()
-            crop.save(buf, format="PNG")
-            return self.normalize_ocr_token(ocr.classification(buf.getvalue()))
+            token, confidence, all_tokens = self.ocr_ensemble(ocr, crop)
+            return token, confidence, all_tokens
 
         answer_tokens = []
         for box in sorted(answer_boxes, key=lambda item: item[0]):
-            token = classify_box(answer_image, box)
+            token, confidence, all_tokens = classify_box(answer_image, box)
             if token in {"", "请", "点", "击", "次", "点击"}:
                 continue
             kind = "digit" if self.is_digit_like_token(token) else "icon"
-            answer_tokens.append((token, kind, box))
+            answer_tokens.append((token, kind, box, confidence, all_tokens))
 
         candidate_tokens = []
         for box in sorted(candidate_boxes, key=lambda item: (item[1], item[0])):
-            token = classify_box(bg_image, box)
-            candidate_tokens.append((token, box))
+            token, confidence, all_tokens = classify_box(bg_image, box)
+            candidate_tokens.append((token, box, confidence, all_tokens))
 
         logging.info(
             "混合点选 OCR 匹配: 答案=%s, 候选=%s",
-            [(token, kind) for token, kind, _box in answer_tokens],
-            [(token, box) for token, box in candidate_tokens],
+            [(token, kind, round(conf, 2), sorted(all_tokens)) for token, kind, _box, conf, all_tokens in answer_tokens],
+            [(token, box, round(conf, 2), sorted(all_tokens)) for token, box, conf, all_tokens in candidate_tokens],
         )
 
         if len(answer_tokens) < 2 or len(candidate_tokens) < 3:
             return []
 
         top_matches = []
-        for token, kind, answer_box in answer_tokens:
+        for token, kind, answer_box, answer_confidence, answer_all_tokens in answer_tokens:
             target = self.expand_box(answer_box, 2, answer_image.width, answer_image.height)
             target_image = answer_image.crop(target[:4])
             target_mask = self.dark_mask(target_image, 130)
             scores = []
-            for candidate_token, candidate_box_item in candidate_tokens:
+            target_aliases = set()
+            for item in answer_all_tokens or {token}:
+                target_aliases.update(self.token_aliases(item))
+            for candidate_token, candidate_box_item, candidate_confidence, candidate_all_tokens in candidate_tokens:
                 if kind == "digit":
                     candidate_norm = self.normalize_ocr_token(candidate_token)
-                    if candidate_norm not in self.token_aliases(token):
+                    candidate_aliases = set()
+                    for item in candidate_all_tokens or {candidate_norm}:
+                        candidate_aliases.update(self.token_aliases(item))
+                    if not (target_aliases & candidate_aliases):
                         continue
-                    score = 1.0 if candidate_norm == token else 0.92
+                    score = 1.0 if candidate_norm == token else 0.90
+                    score += min(answer_confidence, candidate_confidence) * 0.05
                 else:
                     candidate = self.expand_box(candidate_box_item, 3, bg_image.width, bg_image.height)
                     candidate_image = bg_image.crop(candidate[:4])
@@ -425,27 +513,25 @@ class PointClickImageSolver:
 
         def classify_box(box):
             crop = widget_image.crop(tuple(box))
-            buf = BytesIO()
-            crop.save(buf, format="PNG")
-            return self.normalize_ocr_token(ocr.classification(buf.getvalue()))
+            return self.ocr_ensemble(ocr, crop)
 
         answer_tokens = []
         for box in sorted(answer_boxes, key=lambda item: item[0]):
-            token = classify_box(box)
+            token, confidence, all_tokens = classify_box(box)
             if token in {"", "请", "点", "击", "次", "点击"}:
                 continue
-            answer_tokens.append((token, box))
+            answer_tokens.append((token, box, confidence, all_tokens))
 
         candidate_tokens = []
         for box in sorted(candidate_boxes, key=lambda item: (item[1], item[0])):
-            token = classify_box(box)
+            token, confidence, all_tokens = classify_box(box)
             if token:
-                candidate_tokens.append((token, box))
+                candidate_tokens.append((token, box, confidence, all_tokens))
 
         logging.info(
             "点选 OCR 匹配: 答案=%s, 候选=%s",
-            [token for token, _box in answer_tokens],
-            [(token, box) for token, box in candidate_tokens],
+            [(token, round(conf, 2), sorted(all_tokens)) for token, _box, conf, all_tokens in answer_tokens],
+            [(token, box, round(conf, 2), sorted(all_tokens)) for token, box, conf, all_tokens in candidate_tokens],
         )
 
         if len(answer_tokens) < 3 or len(candidate_tokens) < 3:
@@ -453,24 +539,19 @@ class PointClickImageSolver:
 
         matched = []
         used_indexes = set()
-        for answer_token, _answer_box in answer_tokens:
+        for answer_token, _answer_box, _answer_confidence, answer_all_tokens in answer_tokens:
+            answer_aliases = set()
+            for item in answer_all_tokens or {answer_token}:
+                answer_aliases.update(self.token_aliases(item))
             match_index = next(
                 (
                     index
-                    for index, (candidate_token, _candidate_box) in enumerate(candidate_tokens)
-                    if index not in used_indexes and candidate_token == answer_token
+                    for index, (candidate_token, _candidate_box, _candidate_confidence, candidate_all_tokens) in enumerate(candidate_tokens)
+                    if index not in used_indexes
+                    and (candidate_token == answer_token or bool(answer_aliases & self.ocr_aliases(candidate_all_tokens or {candidate_token})))
                 ),
                 None,
             )
-            if match_index is None and answer_token == "0":
-                match_index = next(
-                    (
-                        index
-                        for index, (candidate_token, _candidate_box) in enumerate(candidate_tokens)
-                        if index not in used_indexes and candidate_token in {"0", "6"}
-                    ),
-                    None,
-                )
             if match_index is None:
                 return []
             used_indexes.add(match_index)
@@ -483,25 +564,61 @@ class PointClickImageSolver:
             points.append((center_x, center_y))
         return points
 
-    def find_click_candidates(self, bg_image: Image.Image):
+    @staticmethod
+    def extract_click_region(bg_image: Image.Image) -> tuple:
+        """从整页验证码截图中裁出可点击主图，避免题条/按钮干扰匹配。
+
+        腾讯验证码弹窗结构：题条(y:0~header_h) + 主图 + 确认按钮(bottom_margin)。
+        当截图包含整页时（bg高度/宽度 >= 1.0），自动检测题条底边并裁掉。
+        """
+        width, height = bg_image.size
+        if height / max(width, 1) < 1.0:
+            return bg_image, 0
+
+        env_top = os.getenv("CAPTCHA_BG_CROP_TOP", "0").strip()
+        env_bottom = os.getenv("CAPTCHA_BG_CROP_BOTTOM", "0").strip()
+
+        if env_top and env_top != "0":
+            top = int(env_top)
+        else:
+            top = int(height * 0.095)
+            if top < 35:
+                top = 35
+
+        if env_bottom and env_bottom != "0":
+            bottom_margin = int(env_bottom)
+        else:
+            bottom_margin = int(height * 0.135)
+            if bottom_margin < 50:
+                bottom_margin = 50
+
+        bottom = max(top + 100, height - bottom_margin)
+        if bottom <= top + 40:
+            return bg_image, 0
+        return bg_image.crop((0, top, width, min(bottom, height))), top
+
+    def find_click_candidates(self, bg_image: Image.Image, y_min: float = 0.0, y_max: float | None = None):
         raw_boxes = []
-        for threshold in (75, 95, 115, 135):
+        for threshold in (80, 100, 120, 140):
             mask = self.dark_mask(bg_image, threshold)
             merged_mask = self.close_mask(mask, radius=1)
             merged_mask = self.dilate_mask(merged_mask, radius=1)
-            for box in self.connected_boxes(merged_mask, min_area=45, connectivity=8):
+            for box in self.connected_boxes(merged_mask, min_area=40, connectivity=8):
                 left, top, right, bottom, _area = box
                 width = right - left
                 height = bottom - top
-                if not (12 <= width <= 130 and 12 <= height <= 130):
+                if not (10 <= width <= 140 and 10 <= height <= 140):
                     continue
-                if width * height > 9000:
+                if width * height > 10000:
                     continue
                 original_area = int(mask[top:bottom, left:right].sum())
                 fill_ratio = original_area / max(width * height, 1)
-                # Tencent point-click glyphs are black line drawings. This keeps
-                # dense photo patches out while allowing thin digits and icons.
-                if 45 <= original_area and 0.015 <= fill_ratio <= 0.65:
+                if original_area >= 35 and 0.01 <= fill_ratio <= 0.70:
+                    center_y = (top + bottom) / 2
+                    if center_y < y_min:
+                        continue
+                    if y_max is not None and center_y > y_max:
+                        continue
                     raw_boxes.append((left, top, right, bottom, original_area))
 
         unique_boxes = self.deduplicate_boxes(raw_boxes, tolerance=4)
@@ -733,6 +850,75 @@ class PointClickImageSolver:
                 best = max(best, float(intersection / union))
         return best
 
+    def dense_template_matches(
+        self,
+        target_mask: np.ndarray,
+        bg_image: Image.Image,
+        top_n: int = 8,
+        min_score: float = 0.35,
+    ):
+        """Target-specific rotated template search over the whole background.
+
+        Connected-component detection is brittle when black glyphs overlap fur,
+        grass, or other dark textures. Dense template matching gives each target
+        a few extra candidates before the combination search ranks them.
+        """
+        if cv2 is None or target_mask.size == 0 or not target_mask.any():
+            return []
+
+        bg_mask = (self.dark_mask(bg_image, 120).astype("uint8") * 255)
+        template = (target_mask.astype("uint8") * 255)
+        candidates = []
+        seen_centers = []
+
+        for angle in self.ROTATION_ANGLES:
+            rotated = Image.fromarray(template, mode="L").rotate(
+                angle,
+                expand=True,
+                resample=Image.Resampling.BILINEAR,
+                fillcolor=0,
+            )
+            arr = np.array(rotated)
+            ys, xs = np.where(arr > 20)
+            if len(xs) < 20:
+                continue
+            arr = arr[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
+            h, w = arr.shape
+            if h > bg_mask.shape[0] or w > bg_mask.shape[1] or h < 6 or w < 6:
+                continue
+
+            response = cv2.matchTemplate(bg_mask, arr, cv2.TM_CCOEFF_NORMED)
+            for _ in range(4):
+                _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(response)
+                score = float(max_val)
+                if score < min_score:
+                    break
+                x, y = max_loc
+                center_x = x + (w / 2)
+                center_y = y + (h / 2)
+                if any(abs(center_x - sx) < 12 and abs(center_y - sy) < 12 for sx, sy in seen_centers):
+                    response[
+                        max(0, y - 12) : min(response.shape[0], y + 13),
+                        max(0, x - 12) : min(response.shape[1], x + 13),
+                    ] = 0
+                    continue
+                seen_centers.append((center_x, center_y))
+                box = (
+                    max(0, int(round(center_x - (w / 2)))),
+                    max(0, int(round(center_y - (h / 2)))),
+                    min(bg_image.width, int(round(center_x + (w / 2)))),
+                    min(bg_image.height, int(round(center_y + (h / 2)))),
+                    int(np.count_nonzero(arr > 20)),
+                )
+                candidates.append((score, box))
+                response[
+                    max(0, y - 12) : min(response.shape[0], y + 13),
+                    max(0, x - 12) : min(response.shape[1], x + 13),
+                ] = 0
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[:top_n]
+
     def combined_match_score(
         self,
         target_image: Image.Image,
@@ -756,21 +942,36 @@ class PointClickImageSolver:
         size_score = (width_ratio + height_ratio) / 2.0
         if min(target_width, target_height) >= self.COMPLEX_ICON_SIZE_THRESHOLD:
             return (
-                (soft_score * 0.34)
-                + (visual_score * 0.12)
-                + (icon_score * 0.12)
-                + (shape_score * 0.16)
-                + (edge_score * 0.16)
+                (soft_score * 0.30)
+                + (visual_score * 0.14)
+                + (icon_score * 0.10)
+                + (shape_score * 0.18)
+                + (edge_score * 0.18)
                 + (size_score * 0.10)
             )
         return (
-            (soft_score * 0.42)
-            + (visual_score * 0.10)
-            + (icon_score * 0.30)
-            + (shape_score * 0.04)
-            + (edge_score * 0.09)
-            + (size_score * 0.05)
+            (soft_score * 0.32)
+            + (visual_score * 0.14)
+            + (icon_score * 0.20)
+            + (shape_score * 0.12)
+            + (edge_score * 0.14)
+            + (size_score * 0.08)
         )
+
+    def ocr_match_adjustment(self, ocr, target_token: str, candidate_image: Image.Image) -> float:
+        if not ocr or not self.is_digit_like_token(target_token):
+            return 0.0
+        candidate_token, confidence, all_tokens = self.ocr_ensemble(ocr, candidate_image)
+        target_aliases = self.token_aliases(target_token)
+        candidate_aliases = set()
+        for token in all_tokens or {candidate_token}:
+            normalized = self.normalize_ocr_token(token)
+            candidate_aliases.update(self.token_aliases(normalized))
+        if target_aliases & candidate_aliases:
+            return 0.28 + (0.08 * min(confidence, 1.0))
+        if any(self.is_digit_like_token(self.normalize_ocr_token(token)) for token in all_tokens or {candidate_token}):
+            return -0.14
+        return -0.04
 
     def ranked_solutions_from_images(
         self,
@@ -782,7 +983,8 @@ class PointClickImageSolver:
         min_score_gap: float = 0.005,
     ):
         target_boxes = self.segment_answer_icons(answer_image)
-        candidates = self.find_click_candidates(bg_image)
+        candidate_y_min = float(os.getenv("CAPTCHA_CANDIDATE_MIN_Y", "8"))
+        candidates = self.find_click_candidates(bg_image, y_min=candidate_y_min)
         diagnostics = {
             "answer_size": [answer_image.width, answer_image.height],
             "background_size": [bg_image.width, bg_image.height],
@@ -823,15 +1025,17 @@ class PointClickImageSolver:
             return []
 
         top_matches = []
+        _det, ocr = self._load_ddddocr()
         for target_box in target_boxes:
             target = self.expand_box(target_box, 2, answer_image.width, answer_image.height)
             target_image = answer_image.crop(target[:4])
             target_mask = self.dark_mask(target_image, 130)
+            target_token, _target_confidence, _target_tokens = self.ocr_ensemble(ocr, target_image) if ocr else ("", 0.0, set())
             scores = []
             for candidate_box in candidates:
-                candidate = self.expand_box(candidate_box, 3, bg_image.width, bg_image.height)
+                candidate = self.expand_box(candidate_box, 4, bg_image.width, bg_image.height)
                 candidate_image = bg_image.crop(candidate[:4])
-                candidate_mask = self.dark_mask(candidate_image, 100)
+                candidate_mask = self.dark_mask(candidate_image, 105)
                 scores.append(
                     (
                         float(self.combined_match_score(
@@ -841,8 +1045,18 @@ class PointClickImageSolver:
                             candidate_mask,
                             target_box,
                             candidate_box,
-                        )),
+                        ))
+                        + self.ocr_match_adjustment(ocr, target_token, candidate_image),
                         candidate_box,
+                    )
+                )
+            for dense_score, dense_box in self.dense_template_matches(target_mask, bg_image):
+                dense = self.expand_box(dense_box, 4, bg_image.width, bg_image.height)
+                dense_image = bg_image.crop(dense[:4])
+                scores.append(
+                    (
+                        float(dense_score) + self.ocr_match_adjustment(ocr, target_token, dense_image),
+                        dense_box,
                     )
                 )
             top_matches.append(sorted(scores, key=lambda item: item[0], reverse=True)[:10])
@@ -864,13 +1078,14 @@ class PointClickImageSolver:
                 continue
             best_score = matches[0][0]
             second_score = matches[1][0]
-            if best_score - second_score < min_score_gap:
+            gap = best_score - second_score
+            if gap < min_score_gap and best_score < 0.78:
                 diagnostics["rejection_reason"] = "ambiguous_target"
                 diagnostics["ambiguous_target"] = {
                     "index": index,
                     "best_score": round(float(best_score), 6),
                     "second_score": round(float(second_score), 6),
-                    "gap": round(float(best_score - second_score), 6),
+                    "gap": round(float(gap), 6),
                 }
                 self.last_diagnostics = diagnostics
                 logging.info(
@@ -878,10 +1093,12 @@ class PointClickImageSolver:
                     index,
                     best_score,
                     second_score,
-                    best_score - second_score,
+                    gap,
                     min_score_gap,
                 )
-                return []
+                # Don't hard-reject — let the solver try all combinations anyway
+                # and rely on solution-level thresholds to filter
+                # return []
 
         ranked = []
 
@@ -941,6 +1158,22 @@ class PointClickImageSolver:
                     average_score,
                 )
                 continue
+            point_ys = [(box[1] + box[3]) / 2 for _score, box in chosen]
+            header_band = max(45.0, bg_image.height * 0.12)
+            if len(point_ys) >= 3 and max(point_ys) < header_band:
+                rejected_solutions.append(
+                    {
+                        "reason": "all_points_in_header_band",
+                        "average_score": round(float(average_score), 6),
+                        "point_ys": [round(float(y), 2) for y in point_ys],
+                    }
+                )
+                logging.info(
+                    "Rejected point-click solution: all points in header band (y<%.1f): %s",
+                    header_band,
+                    [round(y, 1) for y in point_ys],
+                )
+                continue
             points = []
             for score, box in chosen:
                 left, top, right, bottom, _ = box
@@ -981,6 +1214,16 @@ class PointClickImageSolver:
         if mixed:
             logging.info("点选验证码 OCR 混合匹配成功，候选方案 %s 个", len(mixed))
             return mixed
+
+        # 最后尝试纯 OCR 路径
+        ocr_pts = self.solve_widget_ocr(answer_image, candidate_box)
+        if ocr_pts:
+            logging.info("点选验证码纯 OCR 匹配成功")
+            solutions = []
+            for points in [ocr_pts]:
+                avg = sum(p[2] if len(p) > 2 else 0.5 for p in points) / max(len(points), 1)
+                solutions.append((avg, points))
+            return solutions
         return []
 
     def solve_from_images(self, answer_image: Image.Image, bg_image: Image.Image):

@@ -9,7 +9,6 @@ from pathlib import Path
 
 import requests
 from PIL import Image
-from selenium.webdriver import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
@@ -20,7 +19,7 @@ from captcha_solver.image import PointClickImageSolver, capture_element_image
 class TencentCaptchaHandler:
     """Tencent point-click captcha handler for 95598 login."""
 
-    POINT_CLICK_MAX_REFRESHES = 3
+    POINT_CLICK_MAX_REFRESHES = 5
 
     def __init__(self, trace_dir=None):
         if trace_dir is None:
@@ -89,7 +88,7 @@ class TencentCaptchaHandler:
         except Exception:
             return None
 
-    def get_visible_descendant(self, driver, selectors, min_width=20, min_height=20):
+    def get_visible_descendant(self, driver, selectors, min_width=20, min_height=20, prefer_largest: bool = True):
         try:
             widget = self._get_visible_widget(driver)
             if not widget:
@@ -100,27 +99,37 @@ class TencentCaptchaHandler:
                 const selectors = arguments[1];
                 const minWidth = arguments[2];
                 const minHeight = arguments[3];
+                const preferLargest = arguments[4];
+                const isVisible = (el, doc) => {
+                  const rect = el.getBoundingClientRect();
+                  const style = doc.defaultView.getComputedStyle(el);
+                  const inViewport = rect.bottom > 0 && rect.right > 0
+                    && rect.top < doc.defaultView.innerHeight && rect.left < doc.defaultView.innerWidth;
+                  return rect.width >= minWidth
+                    && rect.height >= minHeight
+                    && style.display !== 'none'
+                    && style.visibility !== 'hidden'
+                    && inViewport;
+                };
                 const search = (node) => {
                   const doc = node.ownerDocument || node;
-                  const nodes = selectors.flatMap((selector) => Array.from(node.querySelectorAll(selector)));
-                  const visible = nodes
-                    .filter((el) => {
-                      const rect = el.getBoundingClientRect();
-                      const style = doc.defaultView.getComputedStyle(el);
-                      const inViewport = rect.bottom > 0 && rect.right > 0
-                        && rect.top < doc.defaultView.innerHeight && rect.left < doc.defaultView.innerWidth;
-                      return rect.width >= minWidth
-                        && rect.height >= minHeight
-                        && style.display !== 'none'
-                        && style.visibility !== 'hidden'
-                        && inViewport;
-                    })
-                    .sort((a, b) => {
-                      const ar = a.getBoundingClientRect();
-                      const br = b.getBoundingClientRect();
-                      return (br.width * br.height) - (ar.width * ar.height);
-                    });
-                  if (visible.length > 0) return visible[0];
+                  if (!preferLargest) {
+                    for (const selector of selectors) {
+                      const nodes = Array.from(node.querySelectorAll(selector));
+                      const match = nodes.find((el) => isVisible(el, doc));
+                      if (match) return match;
+                    }
+                  } else {
+                    const nodes = selectors.flatMap((selector) => Array.from(node.querySelectorAll(selector)));
+                    const visible = nodes
+                      .filter((el) => isVisible(el, doc))
+                      .sort((a, b) => {
+                        const ar = a.getBoundingClientRect();
+                        const br = b.getBoundingClientRect();
+                        return (br.width * br.height) - (ar.width * ar.height);
+                      });
+                    if (visible.length > 0) return visible[0];
+                  }
                   const frames = Array.from(node.querySelectorAll('iframe,frame'));
                   for (const frame of frames) {
                     try {
@@ -139,6 +148,7 @@ class TencentCaptchaHandler:
                 selectors,
                 min_width,
                 min_height,
+                prefer_largest,
             )
         except Exception:
             return None
@@ -337,36 +347,64 @@ class TencentCaptchaHandler:
         return Image.open(BytesIO(capture_element_image(driver, element))).convert("RGB")
 
     @staticmethod
-    def _click_with_offset(driver, element, x_offset: int, y_offset: int) -> None:
-        try:
-            ActionChains(driver).move_to_element_with_offset(
-                element, x_offset, y_offset
-            ).pause(random.uniform(0.05, 0.15)).click().perform()
-        except Exception:
-            driver.execute_script(
-                "var r = arguments[0].getBoundingClientRect();"
-                "var cx = r.left + r.width/2 + arguments[1];"
-                "var cy = r.top + r.height/2 + arguments[2];"
-                "var el = document.elementFromPoint(cx, cy);"
-                "if (el) {"
-                "  ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){"
-                "    el.dispatchEvent(new MouseEvent(t, {bubbles:true, cancelable:true, clientX:cx, clientY:cy}));"
-                "  });"
-                "}",
-                element,
-                x_offset,
-                y_offset,
-            )
+    def _click_at_image_point(driver, element, x: float, y: float, x_scale: float, y_scale: float) -> None:
+        """按图片左上角为原点换算坐标并点击（与 glm-coding-grabber 一致）。"""
+        driver.execute_script(
+            """
+            const el = arguments[0];
+            const rect = el.getBoundingClientRect();
+            const clientX = rect.left + arguments[1];
+            const clientY = rect.top + arguments[2];
+            const base = {
+              bubbles: true,
+              cancelable: true,
+              clientX,
+              clientY,
+              screenX: clientX,
+              screenY: clientY,
+              button: 0,
+              buttons: 1,
+            };
+            const pointer = Object.assign({}, base, {
+              pointerId: 1,
+              pointerType: 'mouse',
+              isPrimary: true,
+              width: 1,
+              height: 1,
+              pressure: 0.5,
+            });
+            const target = document.elementFromPoint(clientX, clientY) || el;
+            target.dispatchEvent(new MouseEvent('mouseover', base));
+            target.dispatchEvent(new MouseEvent('mousemove', base));
+            if (window.PointerEvent) {
+              target.dispatchEvent(new PointerEvent('pointerdown', pointer));
+            }
+            target.dispatchEvent(new MouseEvent('mousedown', base));
+            if (window.PointerEvent) {
+              target.dispatchEvent(new PointerEvent('pointerup', pointer));
+            }
+            target.dispatchEvent(new MouseEvent('mouseup', base));
+            target.dispatchEvent(new MouseEvent('click', base));
+            """,
+            element,
+            float(x * x_scale),
+            float(y * y_scale),
+        )
 
-    def _try_click_solution(self, driver, bg_element, bg_image, points) -> bool:
+    def _try_click_solution(self, driver, bg_element, bg_image, points, coord_y_offset: float = 0.0) -> bool:
         bg_rect = bg_element.rect
         x_scale = bg_rect["width"] / max(bg_image.width, 1)
         y_scale = bg_rect["height"] / max(bg_image.height, 1)
         for x, y, _score in points:
-            x_offset = int((x * x_scale) - (bg_rect["width"] / 2))
-            y_offset = int((y * y_scale) - (bg_rect["height"] / 2))
-            self._click_with_offset(driver, bg_element, x_offset, y_offset)
-            time.sleep(random.uniform(0.25, 0.55))
+            self._click_at_image_point(
+                driver,
+                bg_element,
+                x,
+                y + coord_y_offset,
+                x_scale,
+                y_scale,
+            )
+            time.sleep(random.uniform(0.30, 0.60))
 
         try:
             confirm = WebDriverWait(driver, 5).until(
@@ -407,14 +445,16 @@ class TencentCaptchaHandler:
                         lambda _d: self.get_visible_descendant(
                             _d,
                             [
+                                ".tencent-captcha-dy__verify-bg-img",
+                                ".tencent-captcha-dy__verify-bg img",
                                 ".tencent-captcha-dy__point-area",
                                 ".tencent-captcha-dy__click-type-wrap",
-                                ".tencent-captcha-dy__verify-bg-img",
                                 ".tencent-captcha-dy__verify-bg",
                                 ".tencent-captcha-dy__image-area",
                             ],
                             min_width=80,
                             min_height=80,
+                            prefer_largest=False,
                         )
                         or False
                     )
@@ -429,19 +469,29 @@ class TencentCaptchaHandler:
                     threshold=245,
                     padding=4,
                 )
-                bg_image = self._load_image_from_element(driver, bg_element)
+                bg_image_raw = self._load_image_from_element(driver, bg_element)
+                bg_image, coord_y_offset = self._point_click_solver.extract_click_region(bg_image_raw)
+                if coord_y_offset:
+                    logging.info(
+                        "验证码背景已裁剪点击区域: 原图=%sx%s, 裁剪后=%sx%s, y偏移=%s",
+                        bg_image_raw.width,
+                        bg_image_raw.height,
+                        bg_image.width,
+                        bg_image.height,
+                        coord_y_offset,
+                    )
 
                 # Save debug images
                 self._save_debug_images(answer_image, bg_image, f"attempt_{attempt}")
 
-                solution_limit = int(os.getenv("CAPTCHA_LOCAL_SOLUTION_CANDIDATES", "3"))
+                solution_limit = int(os.getenv("CAPTCHA_LOCAL_SOLUTION_CANDIDATES", "8"))
                 solutions = self._point_click_solver.ranked_solutions_from_images(
                     answer_image,
                     bg_image,
                     limit=solution_limit,
-                    min_average_score=float(os.getenv("CAPTCHA_MIN_AVG_SCORE", "0.38")),
-                    min_point_score=float(os.getenv("CAPTCHA_MIN_POINT_SCORE", "0.18")),
-                    min_score_gap=float(os.getenv("CAPTCHA_MIN_SCORE_GAP", "0.003")),
+                    min_average_score=float(os.getenv("CAPTCHA_MIN_AVG_SCORE", "0.55")),
+                    min_point_score=float(os.getenv("CAPTCHA_MIN_POINT_SCORE", "0.50")),
+                    min_score_gap=float(os.getenv("CAPTCHA_MIN_SCORE_GAP", "0.008")),
                 )
 
                 if not solutions:
@@ -457,7 +507,13 @@ class TencentCaptchaHandler:
                         [(round(x, 1), round(y, 1), round(s, 3)) for x, y, s in points],
                         average_score,
                     )
-                    if self._try_click_solution(driver, bg_element, bg_image, points):
+                    if self._try_click_solution(
+                        driver,
+                        bg_element,
+                        bg_image_raw,
+                        points,
+                        coord_y_offset=coord_y_offset,
+                    ):
                         logging.info(
                             "第 %s 次尝试方案 #%s 点选验证码识别成功",
                             attempt,

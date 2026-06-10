@@ -139,14 +139,16 @@ python main.py
 在 `.env` 中可以调整：
 
 ```ini
-# 点选验证码最大刷新重试次数（默认 2）
-CAPTCHA_POINT_CLICK_MAX_REFRESHES=2
-# 匹配平均分阈值（默认 0.42，越高越严格）
-CAPTCHA_MIN_AVG_SCORE=0.42
-# 单个点最低分阈值（默认 0.20）
-CAPTCHA_MIN_POINT_SCORE=0.20
-# 分数差距阈值（默认 0.005）
-CAPTCHA_MIN_SCORE_GAP=0.005
+# 点选验证码最大刷新重试次数（默认 4）
+CAPTCHA_POINT_CLICK_MAX_REFRESHES=4
+# 候选方案数量（默认 5）
+CAPTCHA_LOCAL_SOLUTION_CANDIDATES=5
+# 匹配平均分阈值（默认 0.35，越高越严格）
+CAPTCHA_MIN_AVG_SCORE=0.35
+# 单个点最低分阈值（默认 0.16）
+CAPTCHA_MIN_POINT_SCORE=0.16
+# 分数差距阈值（默认 0.002）
+CAPTCHA_MIN_SCORE_GAP=0.002
 ```
 
 ### 兜底方案
