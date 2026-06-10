@@ -1,6 +1,6 @@
 # 国家电网数据获取工具
 
-[![Docker Build](https://github.com/Poiig/ha_sgcc_electricity/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Poiig/ha_sgcc_electricity/actions/workflows/docker-publish.yml)
+[![Docker Build](https://github.com/Poiig/sgcc_electricity/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Poiig/sgcc_electricity/actions/workflows/docker-publish.yml)
 
 自动登录国家电网（95598），抓取电费余额、日/月/年度用电量、分时电量、阶梯用电等数据，存入数据库并支持通过 Web 控制台查看。可选推送到 Home Assistant。
 
@@ -112,7 +112,7 @@
 ### 方式一：Home Assistant Add-on（推荐）
 
 1. 进入 `设置` → `加载项` → `加载项商店`
-2. 右上角 `...` → `仓库`，添加：`https://github.com/Poiig/ha_sgcc_electricity`
+2. 右上角 `...` → `仓库`，添加：`https://github.com/Poiig/sgcc_electricity`
 3. 刷新页面，找到 **国家电网电费数据获取** 并安装
 4. 切换到 `配置` 标签，填写手机号、密码
 5. 配置推送方式：填写 `hass_url` + `hass_token`（REST API）或 `mqtt_host`（MQTT）
@@ -122,8 +122,8 @@
 
 ```bash
 mkdir sgcc_electricity && cd sgcc_electricity
-curl -O https://raw.githubusercontent.com/Poiig/ha_sgcc_electricity/master/docker-compose.yml
-curl -O https://raw.githubusercontent.com/Poiig/ha_sgcc_electricity/master/example.env
+curl -O https://raw.githubusercontent.com/Poiig/sgcc_electricity/master/docker-compose.yml
+curl -O https://raw.githubusercontent.com/Poiig/sgcc_electricity/master/example.env
 cp example.env .env && vim .env
 docker compose up -d --force-recreate
 ```

@@ -13,7 +13,7 @@
 2. 右上角 `...` → `仓库`，添加：
 
 ```text
-https://github.com/Poiig/ha_sgcc_electricity
+https://github.com/Poiig/sgcc_electricity
 ```
 
 3. 找到 `国家电网电费数据获取` 并安装

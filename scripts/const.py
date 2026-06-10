@@ -36,7 +36,7 @@ BALANCE_UNIT = "CNY"
 USAGE_UNIT = "KWH"
 
 # 项目仓库
-REPO_URL = "https://github.com/Poiig/ha_sgcc_electricity"
+REPO_URL = "https://github.com/Poiig/sgcc_electricity"
 
 # Home Assistant 传感器友好名称（日志展示用）
 SENSOR_LABELS = {

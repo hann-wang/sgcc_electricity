@@ -2,11 +2,42 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.1.0] - 2026-06-11
+
+### 新增
+
+- **Web 控制台**：浏览器查看多户用电概览、阶梯用电、日/月图表、运行日志，手动触发同步（`WEB_DASHBOARD=true`）
+- **ENABLE_HA_PUSH 参数**：支持通过环境变量控制是否推送数据到 Home Assistant（默认 `true`），设为 `false` 时仅抓取数据存入数据库
+- **项目定位调整**：从 HA 集成工具重新定位为国家电网数据获取工具，HA 推送为可选功能
+
+### 修复
+
+- **MQTT 实体命名**：修复 MQTT Discovery 实体 ID 生成拼音化问题，正确使用 `object_id` + `default_entity_id`（兼容 HA 2025.10+）
+- **MQTT 连接稳定性**：修复多实例共用 client_id 导致的意外断连，每个连接自动追加唯一后缀
+- **容器重启后按钮状态**：容器异常重启后自动检测并重置任务锁状态，"立即运行"按钮不再被卡住
+- **日志清空后无法输出**：修复清空日志文件后写入失效的问题
+- **日志轮转**：切换为按天轮转，保留 30 天
+
+### 变更
+
+- **Docker 镜像名**：`ha_sgcc_electricity` → `sgcc_electricity`
+- **GitHub 仓库迁移**：`Poiig/ha_sgcc_electricity` → `Poiig/sgcc_electricity`
+- **基础镜像托管**：统一推送到 Docker Hub（`poiigzhao/sgcc_electricity:base`）
+
+### 升级指引
+
+1. 更新镜像名：将 `ha_sgcc_electricity` 替换为 `sgcc_electricity`
+2. 更新仓库地址：`https://github.com/Poiig/sgcc_electricity`
+3. Docker 用户拉取新镜像后 `docker compose up -d --force-recreate`
+4. Add-on 用户更新仓库 URL 后重新安装
+
+---
+
 ## [2.0.0] - 2026-06-02
 
 ### 新增
 
-- **Home Assistant Add-on**：支持从 HA 加载项商店安装（`Poiig/ha_sgcc_electricity`）
+- **Home Assistant Add-on**：支持从 HA 加载项商店安装（`Poiig/sgcc_electricity`）
 - **企业微信汇总推送**：抓取成功后推送多户 Markdown 汇总（余额、日/月/年用电、当月分时、应交金额）
 - **当月分时传感器**：从 `daily_usage` 表 SQL 汇总当前自然月谷/平/峰/尖电量
 - **阶梯用电传感器**：住宅用户一/二/三阶已用、剩余、当前阶段等
@@ -44,6 +75,7 @@
 
 ## [1.7.3] 及更早
 
-见 [GitHub Releases](https://github.com/Poiig/ha_sgcc_electricity/releases) 历史版本（上游 ARC-MX 镜像 tag：`v1.4.0` ~ `v1.7.3`）。
+见 [GitHub Releases](https://github.com/Poiig/sgcc_electricity/releases) 历史版本（上游 ARC-MX 镜像 tag：`v1.4.0` ~ `v1.7.3`）。
 
-[2.0.0]: https://github.com/Poiig/ha_sgcc_electricity/releases/tag/v2.0.0
+[2.1.0]: https://github.com/Poiig/sgcc_electricity/releases/tag/v2.1.0
+[2.0.0]: https://github.com/Poiig/sgcc_electricity/releases/tag/v2.0.0
