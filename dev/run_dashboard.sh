@@ -53,4 +53,17 @@ if ! "$PYTHON" -c "import fastapi" 2>/dev/null; then
 fi
 
 cd "$ROOT/scripts"
-exec "$PYTHON" run_dashboard.py
+export PYTHONUNBUFFERED=1
+
+cleanup() {
+  if [[ -n "${DASH_PID:-}" ]] && kill -0 "$DASH_PID" 2>/dev/null; then
+    kill -INT "$DASH_PID" 2>/dev/null || kill -TERM "$DASH_PID" 2>/dev/null || true
+    wait "$DASH_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup INT TERM
+
+"$PYTHON" -u run_dashboard.py &
+DASH_PID=$!
+wait "$DASH_PID"
+exit $?

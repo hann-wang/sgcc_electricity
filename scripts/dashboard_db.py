@@ -41,6 +41,182 @@ def _current_month_key() -> str:
     return datetime.now().strftime("%Y-%m")
 
 
+def _next_month_key(ym: str) -> str:
+    """自然月 +1，入参 YYYY-MM。"""
+    dt = datetime.strptime(str(ym)[:7], "%Y-%m")
+    if dt.month == 12:
+        return f"{dt.year + 1}-01"
+    return f"{dt.year}-{dt.month + 1:02d}"
+
+
+def _round_step_kwh(v: float) -> float:
+    """阶梯电量四舍五入为整数 kWh。"""
+    return float(round(v))
+
+
+def _step_tiers_equal(a: dict, b: dict) -> bool:
+    """比较两月阶梯快照是否一致（用于识别「同步月新行但统计仍停在上月」）。"""
+    keys = (
+        "used_step1", "remain_step1", "used_step2", "remain_step2",
+        "used_step3", "total_usage", "step_stage",
+    )
+    for key in keys:
+        av = round(float(a.get(key) or 0))
+        bv = round(float(b.get(key) or 0))
+        if av != bv:
+            return False
+    return True
+
+
+def _month_usage_kwh(user_id: str, month: str) -> float:
+    """指定自然月用电量：优先日表汇总（更实时），否则用月表。"""
+    start = f"{month}-01"
+    end = f"{_next_month_key(month)}-01"
+    daily = _query(
+        "SELECT total_usage FROM daily_usage WHERE user_id = ? AND date >= ? AND date < ?",
+        (user_id, start, end),
+    )
+    if daily:
+        total = sum(float(r.get("total_usage") or 0) for r in daily)
+        if total > 0:
+            return _round_step_kwh(total)
+    monthly = _query(
+        "SELECT total_usage FROM monthly_usage WHERE user_id = ? AND month = ? LIMIT 1",
+        (user_id, month),
+    )
+    if monthly and monthly[0].get("total_usage") is not None:
+        val = float(monthly[0]["total_usage"])
+        if val > 0:
+            return _round_step_kwh(val)
+    return 0.0
+
+
+def _normalize_step_integers(step: dict) -> dict:
+    """阶梯相关电量字段统一四舍五入为整数。"""
+    st = dict(step)
+    for key in ("used_step1", "used_step2", "used_step3", "total_usage", "live_extra_kwh"):
+        if st.get(key) is not None:
+            st[key] = _round_step_kwh(float(st[key]))
+    for key in ("remain_step1", "remain_step2"):
+        if st.get(key) is not None:
+            st[key] = _round_step_kwh(float(st[key]))
+    return st
+
+
+def _resolve_step_stat_month(step_row: dict, prev_row: Optional[dict], bill_month: Optional[str]) -> str:
+    """
+    推断国网阶梯页实际统计截止月。
+    同步写入的 year_month 可能是当前月，但页面数据仍停在上月或已出账月。
+    """
+    ym = str(step_row.get("year_month") or _current_month_key())[:7]
+    if prev_row:
+        prev_ym = str(prev_row.get("year_month") or "")[:7]
+        if prev_ym and _step_tiers_equal(step_row, prev_row):
+            return prev_ym
+    bill = str(bill_month or "")[:7]
+    if bill and bill < ym:
+        return bill
+    return ym
+
+
+def _apply_extra_kwh_to_step(step: dict, extra: float) -> dict:
+    """将额外用电量按当前阶梯阶段依次扣减剩余额度。"""
+    if extra <= 0:
+        return step
+    st = dict(step)
+    stage = int(st.get("step_stage") or 1)
+    u1 = float(st.get("used_step1") or 0)
+    r1_raw = st.get("remain_step1")
+    r1 = float(r1_raw) if r1_raw is not None else None
+    u2 = float(st.get("used_step2") or 0)
+    r2_raw = st.get("remain_step2")
+    r2 = float(r2_raw) if r2_raw is not None else None
+    u3 = float(st.get("used_step3") or 0)
+    rem = extra
+    eps = 1e-6
+
+    while rem > eps and stage <= 3:
+        if stage == 1:
+            if r1 is None or r1 <= eps:
+                stage = 2
+                continue
+            take = min(rem, r1)
+            u1 += take
+            r1 -= take
+            rem -= take
+            if r1 <= eps:
+                r1 = 0.0
+                stage = 2
+        elif stage == 2:
+            if r2 is None or r2 <= eps:
+                stage = 3
+                continue
+            take = min(rem, r2)
+            u2 += take
+            r2 -= take
+            rem -= take
+            if r2 <= eps:
+                r2 = 0.0
+                stage = 3
+        else:
+            u3 += rem
+            rem = 0
+
+    st["used_step1"] = _round_step_kwh(u1)
+    st["remain_step1"] = _round_step_kwh(r1) if r1 is not None else None
+    st["used_step2"] = _round_step_kwh(u2)
+    st["remain_step2"] = _round_step_kwh(r2) if r2 is not None else None
+    st["used_step3"] = _round_step_kwh(u3)
+    st["step_stage"] = stage
+    st["total_usage"] = _round_step_kwh(float(st.get("total_usage") or 0) + extra)
+    return st
+
+
+def _merge_step_with_live_usage(
+    step_row: dict,
+    user_id: str,
+    prev_row: Optional[dict] = None,
+    bill_month: Optional[str] = None,
+) -> dict:
+    """
+    在国网阶梯快照基础上叠加统计月之后各月的实时用电（日表/月表）。
+    仅用于控制台展示，不回写 step_usage 表。
+    """
+    stat_month = _resolve_step_stat_month(step_row, prev_row, bill_month)
+    current = _current_month_key()
+    result = _normalize_step_integers(step_row)
+    result["stat_month"] = stat_month
+    result["live_adjusted"] = False
+    result["live_extra_kwh"] = 0.0
+    result["live_extra_months"] = []
+
+    if stat_month >= current:
+        return result
+
+    extra_total = 0.0
+    extra_months: List[dict] = []
+    cursor = _next_month_key(stat_month)
+    while cursor <= current:
+        usage = _month_usage_kwh(user_id, cursor)
+        if usage > 0:
+            extra_total += usage
+            extra_months.append({"month": cursor, "kwh": usage})
+        cursor = _next_month_key(cursor)
+
+    if extra_total <= 0:
+        return result
+
+    merged = _apply_extra_kwh_to_step(result, extra_total)
+    merged["live_adjusted"] = True
+    merged["live_extra_kwh"] = _round_step_kwh(extra_total)
+    merged["live_extra_months"] = [
+        {"month": m["month"], "kwh": _round_step_kwh(m["kwh"])} for m in extra_months
+    ]
+    last_extra = extra_months[-1]["month"]
+    merged["year_month"] = f"{stat_month} ~ {last_extra}" if stat_month < last_extra else stat_month
+    return merged
+
+
 def _sqlite_conn(readonly: bool = True):
     db_path = os.path.join(get_data_dir(), os.getenv("DB_NAME", "homeassistant.db"))
     if not os.path.isfile(db_path):
@@ -280,10 +456,10 @@ def get_user_summary(user_id: str) -> dict:
         (user_id, _current_month_key()),
     )
 
-    step = _query(
+    step_rows = _query(
         "SELECT `year_month`, used_step1, remain_step1, used_step2, remain_step2, "
         "used_step3, total_usage, step_stage FROM step_usage "
-        "WHERE user_id = ? ORDER BY `year_month` DESC LIMIT 1",
+        "WHERE user_id = ? ORDER BY `year_month` DESC LIMIT 2",
         (user_id,),
     )
 
@@ -350,8 +526,12 @@ def get_user_summary(user_id: str) -> dict:
     name = summary.get("user_name") or ""
     is_ev = "电动车" in name or "充电" in name
     summary["is_residential"] = "住宅" in name and not is_ev
-    if step and not is_ev:
-        summary["step_data"] = step[0]
+    if step_rows and not is_ev:
+        prev_step = step_rows[1] if len(step_rows) > 1 else None
+        bill_month = summary.get("bill_month")
+        summary["step_data"] = _merge_step_with_live_usage(
+            step_rows[0], user_id, prev_step, bill_month,
+        )
     return summary
 
 

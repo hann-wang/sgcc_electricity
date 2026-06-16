@@ -56,4 +56,30 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Set-Location (Join-Path $Root "scripts")
-& $Python run_dashboard.py
+$env:PYTHONUNBUFFERED = "1"
+
+# Windows PowerShell 下 & 启动的子进程有时收不到 Ctrl+C，显式转发终止信号
+$proc = Start-Process -FilePath $Python -ArgumentList @("-u", "run_dashboard.py") `
+    -WorkingDirectory (Get-Location) -PassThru -NoNewWindow
+if (-not $proc) {
+    Write-Host "[error] failed to start dashboard" -ForegroundColor Red
+    exit 1
+}
+
+$cancelHandler = [ConsoleCancelEventHandler]{
+    param($sender, $e)
+    $e.Cancel = $true
+    if ($proc -and -not $proc.HasExited) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    }
+}
+[Console]::Add_CancelKeyPress($cancelHandler) | Out-Null
+try {
+    $proc.WaitForExit()
+    if ($proc.ExitCode -ne 0) { exit $proc.ExitCode }
+} finally {
+    [Console]::Remove_CancelKeyPress($cancelHandler) | Out-Null
+    if ($proc -and -not $proc.HasExited) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    }
+}

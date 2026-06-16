@@ -1782,6 +1782,14 @@
       if (v === null || v === undefined || v === "") return "—";
       return Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 2 }) + (unit ? " " + unit : "");
     }
+
+    /* 阶梯电量：四舍五入为整数 kWh */
+    function fmtStepNum(v, unit = "") {
+      if (v === null || v === undefined || v === "") return "—";
+      const n = Math.round(Number(v));
+      if (!Number.isFinite(n)) return "—";
+      return n.toLocaleString("zh-CN", { maximumFractionDigits: 0 }) + (unit ? " " + unit : "");
+    }
     function fmtBold(v, unit = "") {
       if (v === null || v === undefined || v === "") return "—";
       const n = Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 2 });
@@ -1818,11 +1826,12 @@
         2: { used: "#3b82f6", remain: "#60a5fa" },
         3: { used: "#f59e0b", remain: "#fbbf24" },
       };
+      const ri = (v) => (v != null ? Math.round(Number(v)) : null);
       const row = {
-        1: { used: Number(st.used_step1) || 0, remain: st.remain_step1 != null ? Number(st.remain_step1) : null },
-        2: { used: Number(st.used_step2) || 0, remain: st.remain_step2 != null ? Number(st.remain_step2) : null },
-        3: { used: Number(st.used_step3) || 0, remain: null },
-      }[stage] || { used: Number(st.used_step1) || 0, remain: st.remain_step1 != null ? Number(st.remain_step1) : null };
+        1: { used: Math.round(Number(st.used_step1) || 0), remain: ri(st.remain_step1) },
+        2: { used: Math.round(Number(st.used_step2) || 0), remain: ri(st.remain_step2) },
+        3: { used: Math.round(Number(st.used_step3) || 0), remain: null },
+      }[stage] || { used: Math.round(Number(st.used_step1) || 0), remain: ri(st.remain_step1) };
       const colors = palette[stage] || palette[1];
       const hasRemain = row.remain != null && row.remain >= 0 && stage < 3;
       const capacity = hasRemain ? row.used + row.remain : 0;
@@ -1863,18 +1872,34 @@
       }
     }
 
-    function buildStepTitleExtra(cfg) {
+    function fmtStepPeriod(st) {
+      if (!st) return "—";
+      if (st.stat_month && st.live_adjusted && st.live_extra_kwh > 0) {
+        return st.year_month || `${st.stat_month} ~ 当月`;
+      }
+      return st.year_month || st.stat_month || "—";
+    }
+
+    function buildStepTitleExtra(cfg, st) {
       const el = $("stepTitleExtra");
+      const liveHtml = st && st.live_adjusted && st.live_extra_kwh > 0
+        ? `<span class="step-cap-total">含实时 <strong>+${fmtStepNum(st.live_extra_kwh)}</strong> kWh</span>`
+        : "";
       if (!cfg.hasRemain || !cfg.capacity) {
-        el.classList.add("hidden");
-        el.innerHTML = "";
+        if (liveHtml) {
+          el.classList.remove("hidden");
+          el.innerHTML = liveHtml;
+        } else {
+          el.classList.add("hidden");
+          el.innerHTML = "";
+        }
         return;
       }
       el.classList.remove("hidden");
       el.innerHTML = `
         <span class="step-cap-chip"><i style="background:${cfg.colors.used}"></i>已用</span>
         <span class="step-cap-chip"><i style="background:${colorMixAlpha(cfg.colors.remain, 0.55)}"></i>剩余</span>
-        <span class="step-cap-total">本阶额度 <strong>${fmtNum(cfg.capacity)}</strong> kWh</span>`;
+        <span class="step-cap-total">本阶额度 <strong>${fmtStepNum(cfg.capacity)}</strong> kWh</span>${liveHtml}`;
     }
 
     function paintStepPieChart(st, cfg) {
@@ -1915,9 +1940,9 @@
                   const v = ctx.parsed || 0;
                   if (cfg.hasRemain && cfg.capacity > 0) {
                     const p = ((v / cfg.capacity) * 100).toFixed(1);
-                    return ` ${ctx.label}: ${fmtNum(v)} kWh (${p}%)`;
+                    return ` ${ctx.label}: ${fmtStepNum(v)} kWh (${p}%)`;
                   }
-                  return ` ${ctx.label}: ${fmtNum(v)} kWh`;
+                  return ` ${ctx.label}: ${fmtStepNum(v)} kWh`;
                 },
               },
             },
@@ -1949,23 +1974,23 @@
 
       card.classList.remove("hidden");
       rowEl.classList.add("has-step");
-      $("stepMonth").textContent = st.year_month || "—";
+      $("stepMonth").textContent = fmtStepPeriod(st);
 
       const cfg = getCurrentStepCfg(st);
       $("stepStage").textContent = cfg.label;
-      buildStepTitleExtra(cfg);
+      buildStepTitleExtra(cfg, st);
 
       const centerHtml = cfg.hasRemain && cfg.pct != null
         ? `<div class="pct">${cfg.pct.toFixed(0)}%</div><div class="sub">本阶已用占比</div>`
-        : `<div class="pct" style="font-size:1.12rem">${fmtNum(cfg.used)}</div><div class="sub">kWh · ${cfg.label}</div>`;
+        : `<div class="pct" style="font-size:1.12rem">${fmtStepNum(cfg.used)}</div><div class="sub">kWh · ${cfg.label}</div>`;
       $("stepPieCenter").innerHTML = centerHtml;
 
       const remainBlock = cfg.hasRemain
-        ? `<div class="step-pie-stat"><div class="label"><i style="background:${colorMixAlpha(cfg.colors.remain, 0.55)}"></i>剩余</div><div><strong>${fmtNum(cfg.remain)}</strong><span class="unit">kWh</span></div></div>`
+        ? `<div class="step-pie-stat"><div class="label"><i style="background:${colorMixAlpha(cfg.colors.remain, 0.55)}"></i>剩余</div><div><strong>${fmtStepNum(cfg.remain)}</strong><span class="unit">kWh</span></div></div>`
         : `<div class="step-pie-stat"><div class="label"><i style="background:${colorMixAlpha(cfg.colors.remain, 0.55)}"></i>剩余</div><div><strong>—</strong><span class="unit">${cfg.stage >= 3 ? "无配额" : ""}</span></div></div>`;
 
       $("stepLegend").innerHTML = `
-        <div class="step-pie-stat"><div class="label"><i style="background:${cfg.colors.used}"></i>已用</div><div><strong>${fmtNum(cfg.used)}</strong><span class="unit">kWh</span></div></div>
+        <div class="step-pie-stat"><div class="label"><i style="background:${cfg.colors.used}"></i>已用</div><div><strong>${fmtStepNum(cfg.used)}</strong><span class="unit">kWh</span></div></div>
         ${remainBlock}`;
 
       destroyStepPieChart();

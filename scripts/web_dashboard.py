@@ -348,6 +348,18 @@ def start_dashboard_servers(app: Optional[FastAPI] = None, block: bool = False) 
     hosts = _bind_hosts()
     global _server_threads
     _server_threads = []
+
+    # 单地址阻塞模式（本地 run_dashboard.py）：主线程跑 uvicorn，Ctrl+C 可正常退出
+    if block and len(hosts) == 1:
+        host = hosts[0]
+        logging.info("Web 控制台监听 %s:%s", host, port)
+        logging.info("Web 控制台访问: %s", _access_urls(port))
+        try:
+            _run_uvicorn(host, port, app)
+        except KeyboardInterrupt:
+            logging.info("Web 控制台已停止")
+        return
+
     for host in hosts:
         t = threading.Thread(
             target=_run_uvicorn,
@@ -361,10 +373,11 @@ def start_dashboard_servers(app: Optional[FastAPI] = None, block: bool = False) 
     logging.info("Web 控制台访问: %s", _access_urls(port))
     if block:
         try:
-            while True:
-                time.sleep(3600)
+            while any(t.is_alive() for t in _server_threads):
+                time.sleep(0.5)
         except KeyboardInterrupt:
-            pass
+            logging.info("Web 控制台已停止")
+            os._exit(0)
 
 
 def run_in_thread() -> None:
