@@ -9,7 +9,7 @@
   <link rel="apple-touch-icon" href="./sgcc-logo.svg" />
   <meta name="theme-color" content="#0f1419" id="themeColorMeta" />
   <script>
-    /* 首屏防闪烁：在 CSS 渲染前应用已保存的主题偏好 */
+    /* 首屏防闪烁：在 CSS 渲染前应用已保存的主题偏好 + 自定义底色 */
     (function () {
       var mode = localStorage.getItem("dashboard_theme") || "system";
       var resolved = mode === "system"
@@ -17,8 +17,13 @@
         : mode;
       document.documentElement.setAttribute("data-theme", resolved);
       document.documentElement.setAttribute("data-theme-mode", mode);
+      /* 同步恢复自定义底色，避免首屏闪到 CSS 默认值 */
+      var defaults = { dark: "#1c1c1c", light: "#f5f6f8" };
+      var savedBg = localStorage.getItem("dashboard_bg_" + resolved);
+      var bg = savedBg || defaults[resolved];
+      document.documentElement.style.setProperty("--bg-custom", bg);
       var meta = document.getElementById("themeColorMeta");
-      if (meta) meta.content = resolved === "dark" ? "#0f1419" : "#f0f2f5";
+      if (meta) meta.content = bg;
     })();
   </script>
   <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -31,43 +36,47 @@
   <style>
     :root,
     [data-theme="dark"] {
-      /* 分层背景(Grafana 式)：页面更深、卡片为抬升表面，形成明确层级，告别"扁平一片"的 AI 感 */
-      --bg: #0b0e14;
-      --card: #161b26;
-      --border: #262d3a;
+      /* 可自定义底色：默认 HA 风格中性深灰 #1c1c1c，可通过顶栏颜色选择器覆盖。
+         其余表面色由 color-mix 派生，形成 Grafana 式分层(bg < stat < card)。 */
+      --bg-custom: #1c1c1c;
+      --bg: var(--bg-custom);
+      /* card：底色向白提亮 8%，比底色亮一档形成抬升表面 */
+      --card: color-mix(in srgb, var(--bg-custom) 92%, #ffffff);
+      --border: color-mix(in srgb, var(--bg-custom) 70%, #4a4a4a);
       --text: #e7ecf3;
       --muted: #8b9cb3;
-      /* 运维工具基调：国网绿作单一强调色，告别 Tailwind 默认蓝的 SaaS/AI 观感。
-         深色主题用 #047857：白字按钮 5.48:1(AA)，且在深色 card 上仍清晰可辨。
-         accent2 为更亮的 hover/强调态。 */
-      --accent: #047857;
-      --accent2: #10b981;
+      /* 国网官方绿 #00716B：低饱和青绿，沉稳不鲜艳。白字按钮 5.88:1(AA)。
+         accent2 为同色系亮一档，用于 hover/数据区分，避免高饱和荧光感。 */
+      --accent: #00716b;
+      --accent2: #0d8a83;
       --warn: #f59e0b;
       --danger: #ef4444;
       --info: #60a5fa;
       --danger-bg: #450a0a;
       --success-bg: #064e3b;
-      --success-fg: #34d399;
+      --success-fg: #2dd4bf;
       --warn-bg: #422006;
-      --stat-bg: #11151e;
-      --surface-deep: #090c11;
-      --header-grad: #11151e;
+      /* stat-bg：card 基础上压暗 4%，介于 bg 与 card 之间 */
+      --stat-bg: color-mix(in srgb, var(--card) 96%, #000000);
+      /* surface-deep：比底色更暗 5%，用于 navbar 等下沉表面 */
+      --surface-deep: color-mix(in srgb, var(--bg-custom) 95%, #000000);
+      --header-grad: var(--surface-deep);
       --log-text: #b8c5d6;
-      --pill-bg: #1d2533;
-      --step-badge-bg: #064e3b;
-      --step-badge-text: #6ee7b7;
+      --pill-bg: color-mix(in srgb, var(--card) 80%, #000000);
+      --step-badge-bg: color-mix(in srgb, var(--accent) 45%, #000000);
+      --step-badge-text: #5eead4;
       --banner-warn-bg: #431407;
       --banner-warn-border: #7c2d12;
       --banner-warn-text: #fdba74;
       --banner-info-bg: #172554;
       --banner-info-border: #1e3a5f;
       --banner-info-text: #93c5fd;
-      --skeleton-a: #161b26;
-      --skeleton-b: #232a38;
-      --card-hover-border: rgba(16, 185, 129, 0.4);
+      --skeleton-a: var(--card);
+      --skeleton-b: color-mix(in srgb, var(--card) 70%, #ffffff);
+      --card-hover-border: rgba(0, 113, 107, 0.45);
       --card-shadow: rgba(0, 0, 0, 0.35);
       --modal-overlay: rgba(0, 0, 0, 0.6);
-      --scrollbar: #2a3240;
+      --scrollbar: color-mix(in srgb, var(--bg-custom) 70%, #6a6a6a);
       --login-bg: var(--bg);
       --login-box-bg: var(--card);
       --login-input-bg: var(--surface-deep);
@@ -81,48 +90,51 @@
       --chart-tooltip-border: #2d3a4f;
       --chart-point-border: #0f1419;
       --bar-label: #fff;
-      /* 焦点环：国网绿 #34d399 在深色 bg/card 上约 6.5:1，2px 实线 + 光晕保证键盘可见 */
-      --focus-ring: rgba(52, 211, 153, 0.55);
-      --focus-ring-strong: #34d399;
+      /* 焦点环：#2dd4bf 在深色 bg/card 上超 7:1，2px 实线 + 光晕保证键盘可见 */
+      --focus-ring: rgba(45, 212, 191, 0.5);
+      --focus-ring-strong: #2dd4bf;
       --focus-ring-offset: var(--card);
     }
 
     [data-theme="light"] {
-      --bg: #f0f2f5;
+      /* 浅色主题：底色可自定义，默认中性浅灰。card 保持纯白(最亮抬升表面)。 */
+      --bg-custom: #f5f6f8;
+      --bg: var(--bg-custom);
       --card: #ffffff;
-      --border: #d1d9e6;
+      --border: color-mix(in srgb, var(--bg-custom) 60%, #b8c0cc);
       --text: #1a2332;
       /* muted 由 #64748b 调深至 #586476：在 bg 上 5.35:1、card 上 6.00:1，均达 AA 4.5:1 */
       --muted: #586476;
-      /* 国网绿主色：浅主题用更深的 #047857 保证白底 5.2:1 对比度(AA) */
-      --accent: #047857;
-      --accent2: #059669;
+      /* 国网官方绿 #00716B：浅色白底 5.88:1(AA)，低饱和不刺眼 */
+      --accent: #00716b;
+      --accent2: #0d8a83;
       --warn: #d97706;
       --danger: #dc2626;
       --info: #3b82f6;
       --danger-bg: #fef2f2;
       --success-bg: #ecfdf5;
-      --success-fg: #047857;
+      --success-fg: #00716b;
       --warn-bg: #fffbeb;
-      --stat-bg: #f8fafc;
-      --surface-deep: #eef2f7;
-      --header-grad: #e8edf4;
+      --stat-bg: color-mix(in srgb, var(--bg-custom) 50%, #ffffff);
+      /* surface-deep：比底色更暗一档，用于 navbar 等下沉表面 */
+      --surface-deep: color-mix(in srgb, var(--bg-custom) 88%, #000000);
+      --header-grad: var(--surface-deep);
       --log-text: #334155;
-      --pill-bg: #e2e8f0;
-      --step-badge-bg: #d1fae5;
-      --step-badge-text: #047857;
+      --pill-bg: color-mix(in srgb, var(--bg-custom) 40%, #ffffff);
+      --step-badge-bg: color-mix(in srgb, var(--accent) 18%, #ffffff);
+      --step-badge-text: #00716b;
       --banner-warn-bg: #fff7ed;
       --banner-warn-border: #fdba74;
       --banner-warn-text: #c2410c;
       --banner-info-bg: #eff6ff;
       --banner-info-border: #93c5fd;
       --banner-info-text: #1d4ed8;
-      --skeleton-a: #e2e8f0;
-      --skeleton-b: #f1f5f9;
-      --card-hover-border: rgba(4, 120, 87, 0.35);
+      --skeleton-a: color-mix(in srgb, var(--bg-custom) 60%, #ffffff);
+      --skeleton-b: color-mix(in srgb, var(--bg-custom) 30%, #ffffff);
+      --card-hover-border: rgba(0, 113, 107, 0.4);
       --card-shadow: rgba(15, 23, 42, 0.1);
       --modal-overlay: rgba(15, 23, 42, 0.35);
-      --scrollbar: #cbd5e1;
+      --scrollbar: color-mix(in srgb, var(--bg-custom) 50%, #ffffff);
       --login-bg: var(--bg);
       --login-box-bg: var(--card);
       --login-input-bg: #ffffff;
@@ -136,9 +148,9 @@
       --chart-tooltip-border: #d1d9e6;
       --chart-point-border: #ffffff;
       --bar-label: #fff;
-      /* 焦点环：国网绿 #047857 在白/浅灰 card 上 5.2:1，浅主题亦达 AA */
-      --focus-ring: rgba(4, 120, 87, 0.5);
-      --focus-ring-strong: #047857;
+      /* 焦点环：国网绿 #00716b 在白/浅灰 card 上 5.88:1，浅主题亦达 AA */
+      --focus-ring: rgba(0, 113, 107, 0.45);
+      --focus-ring-strong: #00716b;
       --focus-ring-offset: var(--card);
     }
 
@@ -149,7 +161,7 @@
     }
 
     *::selection {
-      background: rgba(16, 185, 129, 0.35);
+      background: rgba(0, 113, 107, 0.35);
       color: #fff;
     }
 
@@ -405,6 +417,123 @@
 
     [data-theme-mode="dark"] #themeBtn .icon-dark {
       display: block;
+    }
+
+    /* 背景色选择器：按钮内嵌色块预览，点击弹出 popover */
+    .bg-color-wrap {
+      position: relative;
+      display: inline-flex;
+    }
+
+    #bgColorBtn {
+      padding: 0.45rem 0.55rem;
+    }
+
+    /* 色块：圆角小方块，带描边便于在浅底上可见 */
+    .bg-color-swatch {
+      display: block;
+      width: 1.15em;
+      height: 1.15em;
+      border-radius: 4px;
+      background: var(--bg-custom);
+      border: 1px solid var(--border);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15);
+    }
+
+    /* popover 浮层：锚定按钮右下方 */
+    .bg-popover {
+      position: absolute;
+      top: calc(100% + 0.5rem);
+      right: 0;
+      z-index: 60;
+      width: 220px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 0.75rem;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      animation: bgPopoverIn 0.15s ease;
+    }
+
+    /* 关键：display:flex 会覆盖 HTML 的 hidden 属性，必须显式恢复，
+       否则刷新后面板默认显示且 JS 设 hidden=true 也关不掉 */
+    .bg-popover[hidden] {
+      display: none;
+    }
+
+    @keyframes bgPopoverIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .bg-popover-title {
+      font-size: 0.78rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    /* 预设色块网格 */
+    .bg-presets {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0.4rem;
+    }
+
+    .bg-preset {
+      aspect-ratio: 1;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      padding: 0;
+      transition: transform 0.1s, box-shadow 0.15s;
+    }
+
+    .bg-preset:hover {
+      transform: scale(1.08);
+    }
+
+    /* 选中态：accent 色描边光环 */
+    .bg-preset.active {
+      box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--accent);
+    }
+
+    /* 自定义颜色行 */
+    .bg-custom-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+
+    .bg-custom-row input[type="color"] {
+      width: 2.2rem;
+      height: 1.8rem;
+      padding: 0;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    /* 重置按钮 */
+    .bg-reset-btn {
+      width: 100%;
+      padding: 0.5rem;
+      border-radius: 8px;
+      background: var(--stat-bg);
+      color: var(--text);
+      font-size: 0.82rem;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .bg-reset-btn:hover {
+      background: var(--surface-deep);
     }
 
     main {
@@ -825,7 +954,7 @@
 
     .stat .delta.down {
       color: var(--accent2);
-      background: rgba(16, 185, 129, 0.12);
+      background: rgba(0, 113, 107, 0.12);
     }
 
     .log-box {
@@ -1751,6 +1880,21 @@
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
           </svg>
         </button>
+        <span class="bg-color-wrap">
+          <button id="bgColorBtn" type="button" class="btn-icon" title="背景色" aria-label="自定义背景色" aria-haspopup="dialog" aria-expanded="false">
+            <span class="bg-color-swatch" id="bgColorSwatch" aria-hidden="true"></span>
+          </button>
+          <!-- 背景色 popover：预设色块 + 自定义颜色选择器 + 重置默认 -->
+          <div id="bgColorPopover" class="bg-popover" role="dialog" aria-label="背景色设置" hidden>
+            <div class="bg-popover-title">背景色</div>
+            <div class="bg-presets" id="bgPresets"></div>
+            <label class="bg-custom-row">
+              <span>自定义</span>
+              <input type="color" id="bgColorPicker" aria-label="选择自定义背景色" />
+            </label>
+            <button type="button" id="bgResetBtn" class="bg-reset-btn">重置为默认</button>
+          </div>
+        </span>
         <button id="logoutBtn" class="btn-icon hidden" aria-label="退出"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
             stroke-linecap="round" stroke-linejoin="round">
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
@@ -1882,14 +2026,47 @@
       document.documentElement.setAttribute("data-theme", resolved);
       document.documentElement.setAttribute("data-theme-mode", mode);
       localStorage.setItem("dashboard_theme", mode);
-      const meta = document.getElementById("themeColorMeta");
-      if (meta) meta.content = resolved === "dark" ? "#0f1419" : "#f0f2f5";
       const titles = { system: "主题：跟随系统", light: "主题：浅色", dark: "主题：深色" };
       const btn = $("themeBtn");
       if (btn) btn.title = titles[mode] + "（点击切换）";
+      /* 切换主题后恢复该主题对应的自定义底色（深/浅各自独立保存） */
+      restoreCustomBg(resolved);
       if (rerenderCharts && lastDailyData.length) renderDailyComboChart(lastDailyData);
       if (rerenderCharts && lastMonthlyData.length) renderMonthlyChart(lastMonthlyData);
       if (rerenderCharts && lastSummary && hasStepData(lastSummary)) renderStepCard(lastSummary);
+      /* 通知 popover 等订阅者：主题已变，预设需跟随刷新 */
+      document.documentElement.dispatchEvent(new CustomEvent("data-theme-change", { detail: { resolved } }));
+    }
+
+    /* 自定义背景色：深/浅主题各存一个 key，切换主题时互不干扰。
+       只注入 --bg-custom，其余表面色由 CSS color-mix 自动派生。 */
+    const BG_DEFAULTS = { dark: "#1c1c1c", light: "#f5f6f8" };
+    const bgKeyOf = (resolved) => "dashboard_bg_" + resolved;
+
+    function applyCustomBg(hex, { persist = true } = {}) {
+      if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
+      const root = document.documentElement;
+      root.style.setProperty("--bg-custom", hex);
+      const swatch = $("bgColorSwatch");
+      if (swatch) swatch.style.background = hex;
+      const picker = $("bgColorPicker");
+      if (picker) picker.value = hex;
+      const meta = document.getElementById("themeColorMeta");
+      if (meta) meta.content = hex;
+      if (persist) {
+        const resolved = root.getAttribute("data-theme") || "dark";
+        localStorage.setItem(bgKeyOf(resolved), hex);
+      }
+      /* 图表 tooltip/grid 读 CSS 变量，重渲染后自动跟随新底色 */
+      if (lastDailyData.length) renderDailyComboChart(lastDailyData);
+      if (lastMonthlyData.length) renderMonthlyChart(lastMonthlyData);
+      if (lastSummary && hasStepData(lastSummary)) renderStepCard(lastSummary);
+    }
+
+    /* 切换主题时，恢复该主题保存的自定义底色；无则用默认值 */
+    function restoreCustomBg(resolved) {
+      const saved = localStorage.getItem(bgKeyOf(resolved));
+      applyCustomBg(saved || BG_DEFAULTS[resolved], { persist: false });
     }
 
     function cycleTheme() {
@@ -2178,9 +2355,9 @@
     function getCurrentStepCfg(st) {
       const stage = Number(st.step_stage) || 1;
       const names = ["", "第一阶梯", "第二阶梯", "第三阶梯"];
-      /* 阶梯三段递进色阶：绿(正常档) → 青(第二档) → 橙(高档/超量)，统一在绿色基调内 */
+      /* 阶梯三段递进色阶：国网绿(正常档) → 青(第二档) → 橙(高档/超量)，统一在低饱和基调内 */
       const palette = {
-        1: { used: "#10b981", remain: "#34d399" },
+        1: { used: "#00716b", remain: "#0d8a83" },
         2: { used: "#0ea5e9", remain: "#38bdf8" },
         3: { used: "#f59e0b", remain: "#fbbf24" },
       };
@@ -2484,7 +2661,7 @@
         data: {
           labels: data.map(d => d.date),
           datasets: [
-            { type: "bar", label: "谷 kWh", data: data.map(d => d.valley_usage || 0), backgroundColor: (c) => makeBarGradient(c, "#10b981", { topAlpha: 0.9, bottomAlpha: 0.55 }), hoverBackgroundColor: (c) => makeBarGradient(c, "#34d399", { topAlpha: 1, bottomAlpha: 0.65 }), borderWidth: 0, borderRadius: 6, borderSkipped: false, stack: "tou", order: 2 },
+            { type: "bar", label: "谷 kWh", data: data.map(d => d.valley_usage || 0), backgroundColor: (c) => makeBarGradient(c, "#00716b", { topAlpha: 0.9, bottomAlpha: 0.55 }), hoverBackgroundColor: (c) => makeBarGradient(c, "#0d8a83", { topAlpha: 1, bottomAlpha: 0.65 }), borderWidth: 0, borderRadius: 6, borderSkipped: false, stack: "tou", order: 2 },
             { type: "bar", label: "峰 kWh", data: data.map(d => d.peak_usage || 0), backgroundColor: (c) => makeBarGradient(c, "#f59e0b", { topAlpha: 0.9, bottomAlpha: 0.55 }), hoverBackgroundColor: (c) => makeBarGradient(c, "#fbbf24", { topAlpha: 1, bottomAlpha: 0.65 }), borderWidth: 0, borderRadius: 0, borderSkipped: false, stack: "tou", order: 2 },
             { type: "line", label: "总用电 kWh", data: data.map(d => d.total_usage), borderColor: "#3b82f6", borderWidth: 2.5, backgroundColor: "rgba(59,130,246,0.1)", tension: 0.35, fill: false, order: 1, pointRadius: 0, pointHoverRadius: 5, pointBackgroundColor: "#3b82f6", pointBorderColor: ct.pointBorder, pointBorderWidth: 2 },
           ],
@@ -2515,8 +2692,8 @@
             {
               type: "bar", label: "用电量 kWh", data: data.map(d => d.total_usage),
               /* 渐变柱：上实色下淡出，去掉丑描边；圆角加大；hover 提亮 */
-              backgroundColor: (c) => makeBarGradient(c, "#10b981", { topAlpha: 0.95, bottomAlpha: 0.45 }),
-              hoverBackgroundColor: (c) => makeBarGradient(c, "#34d399", { topAlpha: 1, bottomAlpha: 0.6 }),
+              backgroundColor: (c) => makeBarGradient(c, "#00716b", { topAlpha: 0.95, bottomAlpha: 0.45 }),
+              hoverBackgroundColor: (c) => makeBarGradient(c, "#0d8a83", { topAlpha: 1, bottomAlpha: 0.6 }),
               borderWidth: 0, borderRadius: 8, borderSkipped: false,
               barPercentage: 0.62, categoryPercentage: 0.7, order: 2,
             },
@@ -2715,6 +2892,71 @@
     $("loginBtn").addEventListener("click", doLogin);
     $("loginPassword").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
     $("themeBtn").addEventListener("click", cycleTheme);
+
+    /* ===== 背景色 popover ===== */
+    /* 预设色：深色主题给深色系，浅色主题给浅色系，切换主题后预设跟随刷新 */
+    const BG_PRESETS = {
+      dark: ["#1c1c1c", "#0b0e14", "#000000", "#1a1a2e", "#16213e", "#0f1f1a", "#1a3a5a", "#2d1b3d", "#3a2a1a", "#262626"],
+      light: ["#f5f6f8", "#ffffff", "#eef2f7", "#f0f4f8", "#fdf6ec", "#f5f0f0", "#eaf2ee", "#f0edf5", "#ececec", "#fafafa"],
+    };
+
+    /* 渲染预设色块；当前底色高亮 active */
+    function renderBgPresets() {
+      const resolved = document.documentElement.getAttribute("data-theme") || "dark";
+      const cur = (getComputedStyle(document.documentElement).getPropertyValue("--bg-custom").trim() || "").toLowerCase();
+      const wrap = $("bgPresets");
+      wrap.innerHTML = "";
+      BG_PRESETS[resolved].forEach(hex => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "bg-preset" + (hex.toLowerCase() === cur ? " active" : "");
+        b.style.background = hex;
+        b.title = hex;
+        b.setAttribute("aria-label", "背景色 " + hex);
+        b.addEventListener("click", () => { applyCustomBg(hex); closeBgPopover(); });
+        wrap.appendChild(b);
+      });
+    }
+
+    function openBgPopover() {
+      renderBgPresets();
+      const pop = $("bgColorPopover");
+      pop.hidden = false;
+      $("bgColorBtn").setAttribute("aria-expanded", "true");
+    }
+
+    function closeBgPopover() {
+      $("bgColorPopover").hidden = true;
+      $("bgColorBtn").setAttribute("aria-expanded", "false");
+    }
+
+    function toggleBgPopover() {
+      if ($("bgColorPopover").hidden) openBgPopover();
+      else closeBgPopover();
+    }
+
+    /* 按钮开关 popover */
+    $("bgColorBtn").addEventListener("click", (e) => { e.stopPropagation(); toggleBgPopover(); });
+    /* 自定义颜色选择器：input 持续预览(不关面板)，change 确认后关闭 */
+    $("bgColorPicker").addEventListener("input", (e) => applyCustomBg(e.target.value));
+    $("bgColorPicker").addEventListener("change", () => closeBgPopover());
+    /* 重置为当前主题默认底色（深浅自动判断） */
+    $("bgResetBtn").addEventListener("click", () => {
+      const resolved = document.documentElement.getAttribute("data-theme") || "dark";
+      localStorage.removeItem(bgKeyOf(resolved));
+      applyCustomBg(BG_DEFAULTS[resolved]);
+      toast("已重置为默认背景色", "info", 1800);
+      closeBgPopover();
+    });
+    /* 点击 popover 外部 / 按 Esc 关闭 */
+    document.addEventListener("click", (e) => {
+      if (!$("bgColorPopover").hidden && !e.target.closest(".bg-color-wrap")) closeBgPopover();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !$("bgColorPopover").hidden) { closeBgPopover(); $("bgColorBtn").focus(); }
+    });
+    /* 主题切换后，预设跟随刷新 + popover 内 picker 同步当前色 */
+    document.documentElement.addEventListener("data-theme-change", renderBgPresets);
     $("fetchBtn").addEventListener("click", async () => {
       if (!(await confirmBox("确定立即同步？国网有登录频率限制，请勿频繁操作。", { okText: "立即同步", danger: true }))) return;
       try { await api("/api/fetch", { method: "POST" }); toast("已启动同步，请查看运行日志", "success"); switchTab("logs"); await refreshAll(); }
